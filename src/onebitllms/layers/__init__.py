@@ -12,3 +12,4 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from .bitnet import BitNetLinear
+from .llama_cpp import LlamaCppFakeQuantLinear

@@ -11,5 +11,5 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from .monkey_patching import replace_linear_with_bitnet_linear
+from .monkey_patching import replace_linear_with_bitnet_linear, replace_linear_with_llama_cpp_fake_quant_linear
 from .quantization_utils import quantize_to_1bit, convert_to_bf16

@@ -11,8 +11,20 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from .kernels import activation_quant_triton, weight_quant_triton
-from .layers import BitNetLinear
-from .utils import replace_linear_with_bitnet_linear, quantize_to_1bit, convert_to_bf16
+from .kernels import (
+    activation_quant_triton,
+    fake_quant_q1_0,
+    fake_quant_q2_0,
+    fake_quant_q4_0,
+    fake_quant_q4_1,
+    weight_quant_triton,
+)
+from .layers import BitNetLinear, LlamaCppFakeQuantLinear
+from .utils import (
+    convert_to_bf16,
+    quantize_to_1bit,
+    replace_linear_with_bitnet_linear,
+    replace_linear_with_llama_cpp_fake_quant_linear,
+)
 
 __version__ = "0.0.5.dev0"

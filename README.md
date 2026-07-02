@@ -100,6 +100,58 @@ You can also use the triton kernels directly for a more fine-grained control ove
 from onebitllms import activation_quant_triton, weight_quant_triton
 ```
 
+The existing Triton kernels are for the BitNet training path:
+
+- `weight_quant_triton`: ternary BitNet weight fake quantization.
+- `activation_quant_triton`: row-wise int8 activation fake quantization.
+
+They are not llama.cpp GGUF packing kernels. On GPU training setups, Triton is
+the right direction for speed, but the quantization formula should be validated
+first with a deterministic PyTorch reference.
+
+### Using llama.cpp fake quantizers
+
+This fork also exposes weight-only fake quantizers that mirror the deterministic
+`prism-llama-cpp` / `ggml` quantize-dequantize formulas:
+
+```python
+from onebitllms import fake_quant_q1_0, fake_quant_q2_0, fake_quant_q4_0, fake_quant_q4_1
+
+w_q1 = fake_quant_q1_0(weight)
+w_q2 = fake_quant_q2_0(weight)
+w_q4 = fake_quant_q4_0(weight)
+w_q41 = fake_quant_q4_1(weight)
+```
+
+For model surgery, replace compatible `nn.Linear` layers in-place:
+
+```python
+from onebitllms import replace_linear_with_llama_cpp_fake_quant_linear
+
+model = replace_linear_with_llama_cpp_fake_quant_linear(model, quant_type="Q2_0")
+```
+
+Supported types:
+
+| Type | Block size | Formula source | Notes |
+| --- | ---: | --- | --- |
+| `Q1_0` | 128 | `prism-llama-cpp` `quantize_row_q1_0_ref` | 1 sign bit plus fp16 block scale |
+| `Q2_0` | 128 | `prism-llama-cpp` `quantize_row_q2_0_ref` | 2-bit codes with C/C++ `std::round` semantics |
+| `Q4_0` | 32 | llama.cpp `quantize_row_q4_0_ref` | signed absmax block quantization |
+| `Q4_1` | 32 | llama.cpp `quantize_row_q4_1_ref` | min/max affine block quantization |
+
+These layers keep floating-point trainable weights, apply quantize-dequantize
+noise in the forward pass, and use straight-through gradients for QAT. They do
+not export GGUF files and they are not inference kernels. The intended flow is:
+
+```text
+QAT with fake quantized PyTorch weights
+-> save HF checkpoint
+-> convert HF checkpoint to F16/BF16 GGUF
+-> run llama-quantize with Q1_0/Q2_0/Q4_0/Q4_1
+-> run inference with llama.cpp / prism-llama-cpp
+```
+
 ### Revert back to bfloat16 format
 
 From our experiments, the BitNet checkpoints are *universal*, meaning we can revert back to bfloat16 format with minimal performance degradation. You can use the method `convert_to_bf16` after training your model:
