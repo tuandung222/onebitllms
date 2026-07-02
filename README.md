@@ -131,6 +131,16 @@ from onebitllms import replace_linear_with_llama_cpp_fake_quant_linear
 model = replace_linear_with_llama_cpp_fake_quant_linear(model, quant_type="Q2_0")
 ```
 
+You can also inject transient Q8_0 activation fake quantization during QAT:
+
+```python
+model = replace_linear_with_llama_cpp_fake_quant_linear(
+    model,
+    quant_type="Q4_0",
+    activation_quant="Q8_0",
+)
+```
+
 Supported types:
 
 | Type | Block size | Formula source | Notes |
@@ -140,9 +150,17 @@ Supported types:
 | `Q4_0` | 32 | llama.cpp `quantize_row_q4_0_ref` | signed absmax block quantization |
 | `Q4_1` | 32 | llama.cpp `quantize_row_q4_1_ref` | min/max affine block quantization |
 
+Supported activation fake quantizers:
+
+| Type | Block size | Formula source | Notes |
+| --- | ---: | --- | --- |
+| `Q8_0` | 32 | llama.cpp `quantize_row_q8_0_ref` | transient int8 activation noise for QAT |
+
 These layers keep floating-point trainable weights, apply quantize-dequantize
 noise in the forward pass, and use straight-through gradients for QAT. They do
-not export GGUF files and they are not inference kernels. The intended flow is:
+not export GGUF files and they are not inference kernels. Activation fake
+quantization is optional and does not mean activations are stored in GGUF. The
+intended flow is:
 
 ```text
 QAT with fake quantized PyTorch weights

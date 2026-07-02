@@ -59,6 +59,7 @@ def replace_linear_with_llama_cpp_fake_quant_linear(
     quant_type: str = "Q4_0",
     target_names: Optional[tuple[str, ...]] = None,
     skip_names: tuple[str, ...] = ("lm_head",),
+    activation_quant: Optional[str] = None,
     accumulator_dtype: Optional[torch.dtype] = torch.float32,
     skip_if_not_divisible_by: Optional[int] = None,
 ):
@@ -74,6 +75,8 @@ def replace_linear_with_llama_cpp_fake_quant_linear(
             containing at least one target substring are replaced.
         skip_names:
             Child module names to keep untouched. Defaults to ``("lm_head",)``.
+        activation_quant:
+            Optional activation fake quantizer. Currently supports ``"Q8_0"``.
         accumulator_dtype:
             Optional dtype used for ``F.linear`` accumulation in the wrapper.
         skip_if_not_divisible_by:
@@ -85,12 +88,17 @@ def replace_linear_with_llama_cpp_fake_quant_linear(
         The input model, modified in-place.
     """
     quant_key = quant_type.upper()
+    activation_quant_key = activation_quant.upper() if activation_quant is not None else None
     if skip_if_not_divisible_by is None:
         block_sizes = {"Q1_0": 128, "Q2_0": 128, "Q4_0": 32, "Q4_1": 32}
         if quant_key not in block_sizes:
             allowed = ", ".join(sorted(block_sizes))
             raise ValueError(f"unsupported llama.cpp fake quant type {quant_type!r}; allowed: {allowed}")
         skip_if_not_divisible_by = block_sizes[quant_key]
+    if activation_quant_key is not None:
+        if activation_quant_key != "Q8_0":
+            raise ValueError(f"unsupported llama.cpp activation fake quant type {activation_quant!r}; allowed: Q8_0")
+        skip_if_not_divisible_by = max(skip_if_not_divisible_by, 32)
 
     for name, module in model.named_children():
         if len(list(module.children())) > 0:
@@ -99,6 +107,7 @@ def replace_linear_with_llama_cpp_fake_quant_linear(
                 quant_type=quant_key,
                 target_names=target_names,
                 skip_names=skip_names,
+                activation_quant=activation_quant_key,
                 accumulator_dtype=accumulator_dtype,
                 skip_if_not_divisible_by=skip_if_not_divisible_by,
             )
@@ -113,6 +122,7 @@ def replace_linear_with_llama_cpp_fake_quant_linear(
         new_layer = LlamaCppFakeQuantLinear.from_linear(
             module,
             quant_type=quant_key,
+            activation_quant=activation_quant_key,
             accumulator_dtype=accumulator_dtype,
         )
         setattr(model, name, new_layer)

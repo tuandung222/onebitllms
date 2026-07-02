@@ -17,6 +17,7 @@ from .kernels import (
     fake_quant_q2_0,
     fake_quant_q4_0,
     fake_quant_q4_1,
+    fake_quant_q8_0_activation,
     weight_quant_triton,
 )
 from .layers import BitNetLinear, LlamaCppFakeQuantLinear

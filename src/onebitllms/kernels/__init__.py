@@ -11,7 +11,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from .llama_cpp_quant import fake_quant_q1_0, fake_quant_q2_0, fake_quant_q4_0, fake_quant_q4_1
+from .llama_cpp_quant import (
+    fake_quant_q1_0,
+    fake_quant_q2_0,
+    fake_quant_q4_0,
+    fake_quant_q4_1,
+    fake_quant_q8_0_activation,
+)
 
 
 def _missing_triton_kernel(*args, **kwargs):

@@ -21,7 +21,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from onebitllms.kernels import fake_quant_q1_0, fake_quant_q2_0, fake_quant_q4_0, fake_quant_q4_1
+from onebitllms.kernels import (
+    fake_quant_q1_0,
+    fake_quant_q2_0,
+    fake_quant_q4_0,
+    fake_quant_q4_1,
+    fake_quant_q8_0_activation,
+)
 
 
 _WEIGHT_QUANTIZERS = {
@@ -36,6 +42,10 @@ _QUANT_BLOCK_SIZES = {
     "Q2_0": 128,
     "Q4_0": 32,
     "Q4_1": 32,
+}
+
+_ACTIVATION_QUANTIZERS = {
+    "Q8_0": fake_quant_q8_0_activation,
 }
 
 
@@ -54,6 +64,7 @@ class LlamaCppFakeQuantLinear(nn.Module):
         out_features: int,
         bias: bool = True,
         quant_type: str = "Q4_0",
+        activation_quant: Optional[str] = None,
         accumulator_dtype: Optional[torch.dtype] = torch.float32,
     ) -> None:
         super().__init__()
@@ -66,10 +77,19 @@ class LlamaCppFakeQuantLinear(nn.Module):
             raise ValueError(
                 f"in_features={in_features} must be divisible by {block_size} for {quant_key} fake quantization"
             )
+        activation_quant_key = activation_quant.upper() if activation_quant is not None else None
+        if activation_quant_key is not None and activation_quant_key not in _ACTIVATION_QUANTIZERS:
+            allowed = ", ".join(sorted(_ACTIVATION_QUANTIZERS))
+            raise ValueError(
+                f"unsupported llama.cpp activation fake quant type {activation_quant!r}; allowed: {allowed}"
+            )
+        if activation_quant_key == "Q8_0" and in_features % 32 != 0:
+            raise ValueError(f"in_features={in_features} must be divisible by 32 for Q8_0 activation fake quantization")
 
         self.in_features = in_features
         self.out_features = out_features
         self.quant_type = quant_key
+        self.activation_quant = activation_quant_key
         self.accumulator_dtype = accumulator_dtype
 
         self.weight = nn.Parameter(torch.empty(out_features, in_features))
@@ -92,6 +112,7 @@ class LlamaCppFakeQuantLinear(nn.Module):
         layer: nn.Linear,
         *,
         quant_type: str = "Q4_0",
+        activation_quant: Optional[str] = None,
         accumulator_dtype: Optional[torch.dtype] = torch.float32,
     ) -> "LlamaCppFakeQuantLinear":
         wrapped = cls(
@@ -99,6 +120,7 @@ class LlamaCppFakeQuantLinear(nn.Module):
             layer.out_features,
             bias=layer.bias is not None,
             quant_type=quant_type,
+            activation_quant=activation_quant,
             accumulator_dtype=accumulator_dtype,
         )
         wrapped.weight.data.copy_(layer.weight.data)
@@ -107,6 +129,10 @@ class LlamaCppFakeQuantLinear(nn.Module):
         return wrapped.to(device=layer.weight.device, dtype=layer.weight.dtype)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.activation_quant is not None:
+            activation_quantizer = _ACTIVATION_QUANTIZERS[self.activation_quant]
+            x = activation_quantizer(x)
+
         weight_quantizer = _WEIGHT_QUANTIZERS[self.quant_type]
         w = weight_quantizer(self.weight)
 
@@ -122,5 +148,6 @@ class LlamaCppFakeQuantLinear(nn.Module):
     def __repr__(self) -> str:
         return (
             f"LlamaCppFakeQuantLinear(in_features={self.in_features}, "
-            f"out_features={self.out_features}, quant_type={self.quant_type})"
+            f"out_features={self.out_features}, quant_type={self.quant_type}, "
+            f"activation_quant={self.activation_quant})"
         )
