@@ -148,6 +148,23 @@ def test_llama_cpp_fake_quant_linear_forward_and_backward():
     assert layer.weight.grad is not None
 
 
+def test_llama_cpp_fake_quant_linear_supports_q4_types():
+    torch.manual_seed(3)
+
+    for quant_type in ("Q4_0", "Q4_1"):
+        layer = LlamaCppFakeQuantLinear(96, 8, bias=True, quant_type=quant_type)
+        x = torch.randn(2, 96, dtype=torch.float32, requires_grad=True)
+
+        y = layer(x)
+        loss = y.square().mean()
+        loss.backward()
+
+        assert y.shape == (2, 8)
+        assert x.grad is not None
+        assert layer.weight.grad is not None
+        assert layer.quant_type == quant_type
+
+
 def test_replace_linear_with_llama_cpp_fake_quant_linear():
     model = nn.Sequential(
         nn.Linear(128, 16),
@@ -162,6 +179,23 @@ def test_replace_linear_with_llama_cpp_fake_quant_linear():
     assert isinstance(model[2][0], LlamaCppFakeQuantLinear)
     assert isinstance(model[2][1], nn.Linear)
     assert model[0].quant_type == "Q1_0"
+
+
+def test_replace_linear_with_llama_cpp_fake_quant_linear_supports_q4_types():
+    model = nn.Sequential(
+        nn.Linear(96, 16),
+        nn.ReLU(),
+        nn.Sequential(nn.Linear(64, 8), nn.Linear(30, 4)),
+    )
+
+    replaced = replace_linear_with_llama_cpp_fake_quant_linear(model, quant_type="Q4_1")
+
+    assert replaced is model
+    assert isinstance(model[0], LlamaCppFakeQuantLinear)
+    assert isinstance(model[2][0], LlamaCppFakeQuantLinear)
+    assert isinstance(model[2][1], nn.Linear)
+    assert model[0].quant_type == "Q4_1"
+    assert model[2][0].quant_type == "Q4_1"
 
 
 def test_llama_cpp_fake_quant_linear_rejects_invalid_block_size():
