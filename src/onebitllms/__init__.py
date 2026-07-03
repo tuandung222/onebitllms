@@ -22,10 +22,12 @@ from .kernels import (
 )
 from .layers import BitNetLinear, LlamaCppFakeQuantLinear
 from .utils import (
+    assert_state_dict_keys_unchanged,
     convert_to_bf16,
     quantize_to_1bit,
     replace_linear_with_bitnet_linear,
     replace_linear_with_llama_cpp_fake_quant_linear,
+    replace_llama_cpp_fake_quant_linear_with_linear,
 )
 
 __version__ = "0.0.5.dev0"

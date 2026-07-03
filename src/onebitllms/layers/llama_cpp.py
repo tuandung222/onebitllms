@@ -124,8 +124,11 @@ class LlamaCppFakeQuantLinear(nn.Module):
             accumulator_dtype=accumulator_dtype,
         )
         wrapped.weight.data.copy_(layer.weight.data)
+        wrapped.weight.requires_grad_(layer.weight.requires_grad)
         if layer.bias is not None and wrapped.bias is not None:
             wrapped.bias.data.copy_(layer.bias.data)
+            wrapped.bias.requires_grad_(layer.bias.requires_grad)
+        wrapped.train(layer.training)
         return wrapped.to(device=layer.weight.device, dtype=layer.weight.dtype)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -144,6 +147,23 @@ class LlamaCppFakeQuantLinear(nn.Module):
             )
             return out.to(x.dtype)
         return F.linear(x, w, self.bias)
+
+    def to_linear(self) -> nn.Linear:
+        """Convert back to nn.Linear while preserving trained float weights."""
+        layer = nn.Linear(
+            self.in_features,
+            self.out_features,
+            bias=self.bias is not None,
+            device=self.weight.device,
+            dtype=self.weight.dtype,
+        )
+        layer.weight.data.copy_(self.weight.data)
+        layer.weight.requires_grad_(self.weight.requires_grad)
+        if self.bias is not None and layer.bias is not None:
+            layer.bias.data.copy_(self.bias.data)
+            layer.bias.requires_grad_(self.bias.requires_grad)
+        layer.train(self.training)
+        return layer
 
     def __repr__(self) -> str:
         return (

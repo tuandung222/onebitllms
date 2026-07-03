@@ -11,12 +11,44 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from collections.abc import Iterable, Mapping
 from typing import Optional
 
 import torch
 import torch.nn as nn
 
 from onebitllms.layers import BitNetLinear, LlamaCppFakeQuantLinear
+
+
+def _state_dict_keys(obj) -> tuple[str, ...]:
+    if isinstance(obj, nn.Module):
+        return tuple(obj.state_dict().keys())
+    if isinstance(obj, Mapping):
+        return tuple(obj.keys())
+    if isinstance(obj, Iterable):
+        return tuple(obj)
+    raise TypeError(f"expected nn.Module, mapping, or iterable of keys, got {type(obj)!r}")
+
+
+def assert_state_dict_keys_unchanged(before, after) -> bool:
+    """Assert two model/key snapshots have identical state_dict key order.
+
+    ``before`` and ``after`` may be modules, state_dict mappings, or iterables of
+    key strings. The function returns True when keys match and raises
+    AssertionError otherwise.
+    """
+    before_keys = _state_dict_keys(before)
+    after_keys = _state_dict_keys(after)
+    if before_keys != after_keys:
+        before_set = set(before_keys)
+        after_set = set(after_keys)
+        missing = sorted(before_set - after_set)
+        unexpected = sorted(after_set - before_set)
+        raise AssertionError(
+            "state_dict keys changed after fake quant module transformation; "
+            f"missing={missing}, unexpected={unexpected}"
+        )
+    return True
 
 def replace_linear_with_bitnet_linear(model, previous_dtype: Optional[torch.dtype] = None):
     """
@@ -126,4 +158,18 @@ def replace_linear_with_llama_cpp_fake_quant_linear(
             accumulator_dtype=accumulator_dtype,
         )
         setattr(model, name, new_layer)
+    return model
+
+
+def replace_llama_cpp_fake_quant_linear_with_linear(model):
+    """Recursively convert llama.cpp fake-quant linear wrappers back to nn.Linear.
+
+    Use this after QAT and before Hugging Face checkpoint saving or GGUF export
+    when downstream code expects standard ``nn.Linear`` modules.
+    """
+    for name, module in model.named_children():
+        if isinstance(module, LlamaCppFakeQuantLinear):
+            setattr(model, name, module.to_linear())
+        else:
+            replace_llama_cpp_fake_quant_linear_with_linear(module)
     return model

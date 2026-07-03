@@ -7,12 +7,14 @@ import torch.nn as nn
 
 from onebitllms import (
     LlamaCppFakeQuantLinear,
+    assert_state_dict_keys_unchanged,
     fake_quant_q1_0,
     fake_quant_q2_0,
     fake_quant_q4_0,
     fake_quant_q4_1,
     fake_quant_q8_0_activation,
     replace_linear_with_llama_cpp_fake_quant_linear,
+    replace_llama_cpp_fake_quant_linear_with_linear,
 )
 
 
@@ -71,6 +73,17 @@ def q8_0_activation_reference(x):
     inv_d = torch.where(d_raw != 0, 1.0 / d_raw, torch.zeros_like(d_raw))
     q = round_away_from_zero(xb * inv_d).clamp(-128.0, 127.0)
     return (q * d).reshape(orig_shape).to(x.dtype)
+
+
+class ToyExportModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.proj = nn.Linear(96, 16)
+        self.block = nn.Sequential(nn.Linear(64, 8), nn.ReLU(), nn.Linear(30, 4))
+        self.lm_head = nn.Linear(96, 16)
+
+    def forward(self, x):
+        return self.lm_head(x) + self.proj(x)
 
 
 def test_q1_0_matches_reference():
@@ -263,6 +276,59 @@ def test_replace_linear_with_llama_cpp_fake_quant_linear_supports_q8_0_activatio
     assert isinstance(model[2][1], nn.Linear)
     assert model[0].activation_quant == "Q8_0"
     assert model[2][0].activation_quant == "Q8_0"
+
+
+def test_fake_quant_patch_unpatch_preserves_state_dict_keys_and_values():
+    torch.manual_seed(6)
+    model = ToyExportModel().to(dtype=torch.float64)
+    model.eval()
+    model.proj.weight.requires_grad_(False)
+    model.proj.bias.requires_grad_(False)
+
+    before_keys = tuple(model.state_dict().keys())
+    before_state = {key: value.detach().clone() for key, value in model.state_dict().items()}
+
+    replace_linear_with_llama_cpp_fake_quant_linear(
+        model,
+        quant_type="Q4_1",
+        activation_quant="Q8_0",
+    )
+
+    assert_state_dict_keys_unchanged(before_keys, model)
+    assert isinstance(model.proj, LlamaCppFakeQuantLinear)
+    assert isinstance(model.block[0], LlamaCppFakeQuantLinear)
+    assert isinstance(model.block[2], nn.Linear)
+    assert isinstance(model.lm_head, nn.Linear)
+    assert model.proj.training is False
+    assert model.proj.weight.requires_grad is False
+    assert model.proj.weight.dtype == torch.float64
+    assert not any("activation_quant" in key for key in model.state_dict())
+
+    for key, value in model.state_dict().items():
+        assert torch.equal(value, before_state[key])
+
+    replace_llama_cpp_fake_quant_linear_with_linear(model)
+
+    assert_state_dict_keys_unchanged(before_keys, model)
+    assert isinstance(model.proj, nn.Linear)
+    assert isinstance(model.block[0], nn.Linear)
+    assert isinstance(model.block[2], nn.Linear)
+    assert isinstance(model.lm_head, nn.Linear)
+    assert model.proj.training is False
+    assert model.proj.weight.requires_grad is False
+    assert model.proj.weight.dtype == torch.float64
+
+    for key, value in model.state_dict().items():
+        assert torch.equal(value, before_state[key])
+
+
+def test_assert_state_dict_keys_unchanged_reports_key_changes():
+    try:
+        assert_state_dict_keys_unchanged(("a.weight",), ("a.weight", "extra"))
+    except AssertionError as exc:
+        assert "unexpected" in str(exc)
+    else:
+        raise AssertionError("expected state_dict key mismatch to fail")
 
 
 def test_llama_cpp_fake_quant_linear_rejects_invalid_block_size():

@@ -141,6 +141,16 @@ model = replace_linear_with_llama_cpp_fake_quant_linear(
 )
 ```
 
+After QAT, convert fake-quant wrappers back to standard `nn.Linear` before
+saving a Hugging Face checkpoint or exporting to GGUF:
+
+```python
+from onebitllms import replace_llama_cpp_fake_quant_linear_with_linear
+
+model = replace_llama_cpp_fake_quant_linear_with_linear(model)
+model.save_pretrained(output_dir)
+```
+
 Supported types:
 
 | Type | Block size | Formula source | Notes |
