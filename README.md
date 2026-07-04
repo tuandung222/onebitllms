@@ -1,33 +1,219 @@
-
 <p align="center">
-  <img src="assets/onebitllms-logo.png" alt="logo" width="400" >
+  <img src="assets/onebitllms-logo.png" alt="onebitllms logo" width="400">
 </p>
 
-> `onebitllms` is a lightweight python package that can be used to easily perform Large-Language Model (LLMs) fine-tuning following the training procedure from BitNet, to produce customized 1.58-bit LLMs.
+# onebitllms fork: BitNet fine-tuning và llama.cpp-compatible QAT
 
-## Requirements
+Fork này mở rộng `onebitllms` theo hai hướng:
 
-Currently the library only works for NVIDIA CUDA compiled GPUs.
+1. Giữ lại đường fine-tuning BitNet / 1.58-bit từ upstream.
+2. Thêm các fake quantizer tương thích công thức `llama.cpp` / `prism-llama-cpp` để nghiên cứu QAT trước khi export sang GGUF và PTQ bằng `llama-quantize`.
 
-## Installation
+Mục tiêu thực tế của fork là phục vụ nghiên cứu quy trình:
 
-Download the package through pip:
-
-```bash
-pip install onebitllms
+```text
+QAT trong PyTorch
+-> lưu Hugging Face checkpoint chuẩn
+-> convert sang GGUF F16/BF16
+-> PTQ bằng llama.cpp / prism-llama-cpp
+-> inference trên desktop
 ```
 
-or directly from source:
+Các layer fake quant trong fork này không phải inference kernel và không pack GGUF. Chúng giữ weight trainable ở floating-point, inject nhiễu quantize-dequantize trong forward pass, và dùng straight-through estimator cho backward.
+
+## Tính năng chính
+
+| Nhóm | Trạng thái | Ghi chú |
+| --- | --- | --- |
+| BitNet / 1.58-bit fine-tuning | Có | Kế thừa upstream `onebitllms`, dùng `BitNetLinear` và Triton kernels |
+| Triton quant kernels | Có | Phục vụ đường BitNet training, không phải GGUF packing |
+| llama.cpp fake quant weight | Có | `Q1_0`, `Q2_0`, `Q4_0`, `Q4_1`, `Q8_0`, `Q8_1` |
+| llama.cpp fake quant activation | Có | `activation_quant="Q8_0"` như nhiễu tạm thời trong QAT |
+| Patch/unpatch `nn.Linear` | Có | Dùng để train bằng wrapper rồi export checkpoint chuẩn |
+| GGUF export trực tiếp | Không | Dùng converter và `llama-quantize` của llama.cpp |
+| Inference kernel | Không | Inference chạy bằng llama.cpp / prism-llama-cpp / bitnet.cpp |
+
+## Cài đặt
+
+Fork này nên được cài từ source:
 
 ```bash
-pip install git+https://github.com/tiiuae/onebitllms.git
+git clone https://github.com/tuandung222/onebitllms.git
+cd onebitllms
+pip install -e .
 ```
 
-## Getting started
+Nếu muốn chạy test:
 
-### 1.58bit Fine-tuning
+```bash
+pip install -e ".[test]"
+```
 
-Simply use the `replace_linear_with_bitnet_linear` after loading the **pre-quantized** checkpoint, and use directly that model for fine-tuning (e.g. with `SFTTrainer` from `trl` library):
+Yêu cầu chính:
+
+- Python >= 3.9.
+- PyTorch.
+- `transformers`, `accelerate`, `safetensors`, `huggingface_hub`.
+- GPU NVIDIA + Triton nếu dùng đường BitNet CUDA kernels.
+- Local `prism-llama-cpp` hoặc `llama.cpp` nếu muốn kiểm thử alignment, convert GGUF, quantize và inference.
+
+## Quick start: llama.cpp-compatible QAT
+
+### 1. Fake quant trực tiếp một tensor
+
+```python
+import torch
+from onebitllms import fake_quant_q4_0, fake_quant_q4_1, fake_quant_q8_0
+
+weight = torch.randn(128, 256)
+
+w_q4_0 = fake_quant_q4_0(weight)
+w_q4_1 = fake_quant_q4_1(weight)
+w_q8_0 = fake_quant_q8_0(weight)
+```
+
+### 2. Thay `nn.Linear` bằng fake quant wrapper
+
+```python
+from transformers import AutoModelForCausalLM
+from onebitllms import replace_linear_with_llama_cpp_fake_quant_linear
+
+model = AutoModelForCausalLM.from_pretrained(
+    "Qwen/Qwen3-1.7B",
+    torch_dtype="auto",
+    device_map="auto",
+)
+
+model = replace_linear_with_llama_cpp_fake_quant_linear(
+    model,
+    quant_type="Q4_1",
+)
+```
+
+Wrapper sẽ thay các `nn.Linear` tương thích block size. Mặc định helper bỏ qua `lm_head`.
+
+### 3. Bật fake quant activation Q8_0 nếu cần
+
+```python
+model = replace_linear_with_llama_cpp_fake_quant_linear(
+    model,
+    quant_type="Q8_0",
+    activation_quant="Q8_0",
+)
+```
+
+Lưu ý: activation fake quant chỉ inject nhiễu trong training. GGUF không lưu activation ở dạng quantized.
+
+### 4. Unpatch trước khi lưu checkpoint
+
+```python
+from onebitllms import replace_llama_cpp_fake_quant_linear_with_linear
+
+model = replace_llama_cpp_fake_quant_linear_with_linear(model)
+model.save_pretrained("output-hf-checkpoint")
+```
+
+Không nên lưu checkpoint HF khi model vẫn còn `LlamaCppFakeQuantLinear`, vì converter của llama.cpp kỳ vọng cấu trúc module/weight chuẩn.
+
+## Các kiểu llama.cpp fake quant đang hỗ trợ
+
+| Type | Block size | Công thức | Có nên dùng làm target export? |
+| --- | ---: | --- | --- |
+| `Q1_0` | 128 | `prism-llama-cpp` `quantize_row_q1_0_ref` | Chỉ dùng nếu fork/export path hỗ trợ |
+| `Q2_0` | 128 | `prism-llama-cpp` `quantize_row_q2_0_ref` | Chỉ dùng nếu fork/export path hỗ trợ |
+| `Q4_0` | 32 | llama.cpp `quantize_row_q4_0_ref` | Có, nếu sẽ PTQ bằng `llama-quantize Q4_0` |
+| `Q4_1` | 32 | llama.cpp `quantize_row_q4_1_ref` | Có, nếu sẽ PTQ bằng `llama-quantize Q4_1` |
+| `Q8_0` | 32 | llama.cpp `quantize_row_q8_0_ref` / `dequantize_row_q8_0` | Có, đây là target 8-bit chính |
+| `Q8_1` | 32 | ggml `quantize_row_q8_1_ref` | Không nên xem là target export thông thường |
+
+`Q8_0` là lựa chọn 8-bit nên ưu tiên. Trong `prism-llama-cpp`, `Q8_0` xuất hiện trực tiếp trong `tools/quantize/quantize.cpp` như một mode quantize model. `Q8_1` có trong `ggml`, nhưng chủ yếu là format runtime/vector-dot và không phải lựa chọn `llama-quantize` thông thường. `Q8_K` cũng là format nội bộ/K-quant nên chưa được expose như QAT target trong fork này.
+
+## Quy trình QAT -> GGUF -> inference
+
+Luồng khuyến nghị:
+
+```text
+1. Load model HF.
+2. Patch selected Linear layers bằng LlamaCppFakeQuantLinear.
+3. Fine-tune/QAT trong PyTorch.
+4. Unpatch về nn.Linear.
+5. Save HF checkpoint.
+6. Convert checkpoint sang GGUF F16/BF16 bằng llama.cpp.
+7. Chạy llama-quantize với target khớp fake quant, ví dụ Q8_0.
+8. Chạy llama-cli để smoke test inference.
+9. Chạy eval cố định để so QAT+PTQ với PTQ-only.
+```
+
+Ví dụ phần PTQ sau khi đã có GGUF F16/BF16:
+
+```bash
+/path/to/prism-llama-cpp/build/bin/llama-quantize \
+  model-f16.gguf \
+  model-q8_0.gguf \
+  Q8_0
+```
+
+Smoke test inference:
+
+```bash
+/path/to/prism-llama-cpp/build/bin/llama-cli \
+  -m model-q8_0.gguf \
+  -p "Explain quantization-aware training in one paragraph." \
+  -n 64
+```
+
+## Kiểm thử và validation
+
+Fork này có hai lớp test chính cho phần llama.cpp fake quant.
+
+### Unit tests
+
+Nếu có `pytest`:
+
+```bash
+PYTHONPATH=src python -m pytest tests/test_llama_cpp_fake_quant.py -q
+```
+
+Nếu môi trường chưa có `pytest`:
+
+```bash
+PYTHONPATH=src python - <<'PY'
+import tests.test_llama_cpp_fake_quant as t
+
+for name in sorted(n for n in dir(t) if n.startswith("test_")):
+    getattr(t, name)()
+    print(f"{name}: ok")
+PY
+```
+
+Các test này kiểm tra:
+
+- Công thức tensor khớp reference PyTorch.
+- Rounding half-tie khớp C/C++ `roundf`.
+- Forward/backward của `LlamaCppFakeQuantLinear`.
+- STE gradient không bị đứt.
+- Patch/unpatch giữ nguyên `state_dict` keys và values.
+
+### Q8_0 alignment với gguf-py
+
+Script alignment đối chiếu `fake_quant_q8_0` với implementation `Q8_0` trong `prism-llama-cpp/gguf-py`:
+
+```bash
+PYTHONPATH=src python scripts/check_llama_cpp_q8_0_alignment.py \
+  --prism-llama-cpp /path/to/prism-llama-cpp
+```
+
+Điều kiện pass:
+
+```text
+summary: max_error=0 mismatches=0
+```
+
+Nếu có bất kỳ mismatch nào, không được xem `Q8_0` fake quant là tương thích công thức.
+
+## BitNet / 1.58-bit fine-tuning
+
+Đường BitNet gốc của upstream vẫn được giữ lại. Ví dụ fine-tune từ checkpoint pre-quantized:
 
 ```python
 import torch
@@ -37,266 +223,173 @@ from onebitllms import replace_linear_with_bitnet_linear
 model_id = "tiiuae/Falcon-E-1B-Base"
 revision = "prequantized"
 
-tokenizer = AutoTokenizer.from_pretrained(
-    model_id, revision=revision
-)
+tokenizer = AutoTokenizer.from_pretrained(model_id, revision=revision)
 
 model = AutoModelForCausalLM.from_pretrained(
     model_id,
     revision=revision,
     torch_dtype=torch.bfloat16,
-    device_map="auto"
+    device_map="auto",
 )
 
 model = replace_linear_with_bitnet_linear(model)
-
-# Do the training here ...
 ```
 
-After training your model, make sure to quantize the final checkpoint in 1-bit precision with the method `quantize_to_1bit`:
+Sau khi train xong, quantize checkpoint về 1-bit:
 
 ```python
 from onebitllms import quantize_to_1bit
 
-model_output_dir = ""
-quantized_model_output_dir = ""
-
-quantize_to_1bit(model_output_dir, quantized_model_output_dir)
+quantize_to_1bit(
+    "model-output-dir",
+    "quantized-model-output-dir",
+)
 ```
 
-Example scripts can be found in `examples/`. We use the following command on a 8xA10G 23GB instance and training took ~8.5 hours.
-
-```bash
-python examples/sft.py \
-    --model_name_or_path tiiuae/Falcon-E-1B-Base \
-    --model_revision prequantized \
-    --torch_dtype bfloat16 \
-    --learning_rate 0.0001 \
-    --dataset_name trl-lib/Capybara \
-    --per_device_train_batch_size 1 \
-    --output_dir Falcon-E-Capybara \
-    --logging_steps 1 \
-    --save_strategy steps \
-    --save_steps 100 \
-    --packing \
-    --gradient_accumulation_steps 16
-```
-
-Once your 1.58bit model is ready, we suggest you to deploy it with [`bitnet.cpp` package](https://github.com/microsoft/BitNet).
-
-### Using quantization triton kernels
-
-You can also inject the `BitNetLinear` classes into your pre-training framework:
+Có thể revert checkpoint BitNet về BF16:
 
 ```python
-from onebitllms import BitNetLinear
+from onebitllms import convert_to_bf16
 
-# inject it in your model classes for pre-training ..
+convert_to_bf16(
+    "quantized-model-output-dir",
+    "bf16-model-output-dir",
+)
 ```
 
-You can also use the triton kernels directly for a more fine-grained control over the operations:
+Inference BitNet nên chạy bằng [`bitnet.cpp`](https://github.com/microsoft/BitNet) hoặc integration phù hợp trong `transformers`.
+
+## Triton kernels
+
+Fork này vẫn expose các Triton kernels từ upstream:
 
 ```python
 from onebitllms import activation_quant_triton, weight_quant_triton
 ```
 
-The existing Triton kernels are for the BitNet training path:
+Ý nghĩa:
 
 - `weight_quant_triton`: ternary BitNet weight fake quantization.
-- `activation_quant_triton`: row-wise int8 activation fake quantization.
+- `activation_quant_triton`: row-wise int8 activation fake quantization cho đường BitNet.
 
-They are not llama.cpp GGUF packing kernels. On GPU training setups, Triton is
-the right direction for speed, but the quantization formula should be validated
-first with a deterministic PyTorch reference.
+Các kernel này không phải GGUF packing kernels. Nếu sau này tối ưu QAT trên GPU cho các kiểu `llama.cpp`, hướng đúng là thêm kernel Triton sau khi công thức PyTorch/reference đã được chứng minh khớp `ggml`.
 
-### Sử dụng llama.cpp fake quantizers
-
-Fork này cung cấp thêm các fake quantizer cho weight, bám theo công thức
-quantize-dequantize xác định trong `prism-llama-cpp` / `ggml`:
-
-```python
-from onebitllms import (
-    fake_quant_q1_0,
-    fake_quant_q2_0,
-    fake_quant_q4_0,
-    fake_quant_q4_1,
-    fake_quant_q8_0,
-)
-
-w_q1 = fake_quant_q1_0(weight)
-w_q2 = fake_quant_q2_0(weight)
-w_q4 = fake_quant_q4_0(weight)
-w_q41 = fake_quant_q4_1(weight)
-w_q8 = fake_quant_q8_0(weight)
-```
-
-Để thay layer trong model, có thể replace trực tiếp các `nn.Linear` tương thích:
-
-```python
-from onebitllms import replace_linear_with_llama_cpp_fake_quant_linear
-
-model = replace_linear_with_llama_cpp_fake_quant_linear(model, quant_type="Q2_0")
-```
-
-Có thể bật thêm fake quant activation `Q8_0` tạm thời trong quá trình QAT:
-
-```python
-model = replace_linear_with_llama_cpp_fake_quant_linear(
-    model,
-    quant_type="Q4_0",
-    activation_quant="Q8_0",
-)
-```
-
-Sau QAT, hãy chuyển wrapper fake quant về lại `nn.Linear` chuẩn trước khi lưu
-checkpoint Hugging Face hoặc export sang GGUF:
-
-```python
-from onebitllms import replace_llama_cpp_fake_quant_linear_with_linear
-
-model = replace_llama_cpp_fake_quant_linear_with_linear(model)
-model.save_pretrained(output_dir)
-```
-
-Các kiểu weight fake quant đang hỗ trợ:
-
-| Type | Block size | Nguồn công thức | Ghi chú |
-| --- | ---: | --- | --- |
-| `Q1_0` | 128 | `prism-llama-cpp` `quantize_row_q1_0_ref` | 1 sign bit và fp16 scale theo block |
-| `Q2_0` | 128 | `prism-llama-cpp` `quantize_row_q2_0_ref` | mã 2-bit với ngữ nghĩa `std::round` của C/C++ |
-| `Q4_0` | 32 | llama.cpp `quantize_row_q4_0_ref` | block quantization theo signed absmax |
-| `Q4_1` | 32 | llama.cpp `quantize_row_q4_1_ref` | block quantization affine theo min/max |
-| `Q8_0` | 32 | llama.cpp `quantize_row_q8_0_ref` / `dequantize_row_q8_0` | target GGUF thật, dùng được với `llama-quantize Q8_0` |
-| `Q8_1` | 32 | ggml `quantize_row_q8_1_ref` | format runtime/vector-dot; không phải target export model thông thường của `llama-quantize` |
-
-Các kiểu activation fake quant đang hỗ trợ:
-
-| Type | Block size | Nguồn công thức | Ghi chú |
-| --- | ---: | --- | --- |
-| `Q8_0` | 32 | llama.cpp `quantize_row_q8_0_ref` | nhiễu int8 activation tạm thời cho QAT |
-
-Các layer này vẫn giữ weight trainable ở floating-point, áp dụng nhiễu
-quantize-dequantize trong forward pass, và dùng straight-through gradient cho
-QAT. Chúng không export file GGUF và không phải inference kernel. Activation
-fake quantization là tùy chọn và không có nghĩa activation được lưu trong GGUF.
-Luồng sử dụng dự kiến:
+## Cấu trúc repo
 
 ```text
-QAT với PyTorch weight được fake quant
--> lưu HF checkpoint
--> convert HF checkpoint sang F16/BF16 GGUF
--> chạy llama-quantize với Q1_0/Q2_0/Q4_0/Q4_1/Q8_0
--> inference bằng llama.cpp / prism-llama-cpp
+src/onebitllms/
+  kernels/
+    llama_cpp_quant.py      # fake quantizers Q1/Q2/Q4/Q8 theo ggml
+    activation_quant.py     # Triton activation kernel cho BitNet
+    weight_quant.py         # Triton weight kernel cho BitNet
+  layers/
+    llama_cpp.py            # LlamaCppFakeQuantLinear
+    bitnet.py               # BitNetLinear
+  utils/
+    monkey_patching.py      # patch/unpatch Linear layers
+    quantization_utils.py   # BitNet checkpoint utilities
+
+tests/
+  test_llama_cpp_fake_quant.py
+  test_kernels.py
+
+docs/
+  llama_cpp_q8_0_qat.md
+  testing_llama_cpp_fake_quant.md
+
+scripts/
+  check_llama_cpp_q8_0_alignment.py
 ```
 
-Với QAT 8-bit để chạy inference desktop, nên ưu tiên `quant_type="Q8_0"` vì
-`prism-llama-cpp/tools/quantize` expose `Q8_0` như một mode quantize model.
-`Q8_1` tồn tại trong ggml như block quantized dùng cho các đường vector-dot;
-nhiễu QAT sau dequant cũng là `q * d` như Q8_0, nhưng nên xem là fake quantizer
-experimental/runtime-style nếu export path chưa hỗ trợ tensor Q8_1 rõ ràng.
+## Tài liệu chi tiết
 
-`Q8_K` cũng xuất hiện trong ggml như format K-quant/vector-dot nội bộ, nhưng
-không được expose như mode `llama-quantize` thông thường trong fork này. Vì vậy
-package chưa expose `Q8_K` như một QAT target.
+- [Q8_0 QAT tương thích llama.cpp](docs/llama_cpp_q8_0_qat.md)
+- [Kế hoạch kiểm thử llama.cpp fake quant](docs/testing_llama_cpp_fake_quant.md)
 
-Tài liệu chi tiết:
+## Giới hạn cần nhớ
 
-- [`docs/llama_cpp_q8_0_qat.md`](docs/llama_cpp_q8_0_qat.md): giải thích công thức `Q8_0`, khác biệt với `Q8_1/Q8_K`, và quy trình QAT -> GGUF.
-- [`docs/testing_llama_cpp_fake_quant.md`](docs/testing_llama_cpp_fake_quant.md): kế hoạch kiểm thử nhiều lớp để kiểm tra fake quantizer không lệch khỏi llama.cpp.
+- Fake quant đúng công thức không đảm bảo checkpoint QAT sẽ tốt hơn PTQ-only. Cần eval chất lượng riêng.
+- `activation_quant="Q8_0"` không có nghĩa activation được lưu trong GGUF.
+- `Q8_1` và `Q8_K` không nên được quảng bá như target export GGUF thông thường trong fork hiện tại.
+- Trước khi export HF checkpoint sang GGUF, phải unpatch wrapper fake quant về `nn.Linear`.
+- Nếu target là một kiểu quantize khác của llama.cpp, fake quant trong QAT nên khớp đúng công thức của target đó.
 
-### Revert back to bfloat16 format
+## FAQ
 
-From our experiments, the BitNet checkpoints are *universal*, meaning we can revert back to bfloat16 format with minimal performance degradation. You can use the method `convert_to_bf16` after training your model:
+### Fork này khác upstream `tiiuae/onebitllms` ở đâu?
 
-```python
-from onebitllms import convert_to_bf16
+Fork này giữ đường BitNet của upstream và thêm đường nghiên cứu QAT tương thích `llama.cpp` / `prism-llama-cpp`.
 
-model_output_dir = ""
-quantized_model_output_dir = ""
+### Có thể dùng fork này để inference trực tiếp không?
 
-convert_to_bf16(model_output_dir, quantized_model_output_dir)
-```
+Không. Fork này phục vụ training/fine-tuning/fake quant. Inference nên chạy bằng `llama.cpp`, `prism-llama-cpp`, `bitnet.cpp`, hoặc backend inference phù hợp.
 
-## Common questions
+### QAT xong có cần `llama-quantize` nữa không?
 
-*What is 1-bit fine-tuning?*
+Có. Fake quant trong QAT chỉ giúp model thấy nhiễu quantization trong training. Sau khi lưu checkpoint HF, vẫn cần convert sang GGUF và chạy `llama-quantize` để tạo file quantized thật.
 
-We term *1-bit fine-tuning* as simply doing continuous training from a **pre-quantized** BitNet compatible checkpoint. As of today, there are multiple ongoing work that explores fine-tuning existing checkpoints into BitNet format but this often leads to poor performance.
+### Nên chọn `Q8_0` hay `Q8_1` cho QAT 8-bit?
 
-*What models can I fine-tune?*
+Nên chọn `Q8_0` nếu mục tiêu là desktop inference bằng GGUF, vì `Q8_0` là mode quantize model thật trong `llama-quantize`. `Q8_1` là format runtime/vector-dot trong `ggml`, không phải đường export thông thường.
 
-To the best of our knowledge, as of today, only Falcon-Edge and recent Microsoft BitNet series models published their **pre-quantized** checkpoints. If in the future other models gets published together with their **pre-quantized** checkpoints, they should be compatible with `onebitllms` out-of-the-box.
+### LoRA có được hỗ trợ không?
 
-*What else can I do with `onebitllms`?*
-
-You can also use the `BitnetLinear` class exposed in this package and use it inside your pre-training / fine-tuning framework. In contrary to existing implementation, we use optimized triton kernels for computing the quantization errors making the pre-training and fine-tuning much faster than existing implementations. From our experiments, we estimate the overheads between non-BitNet and BitNet pre-training to be around ~20% (to be confirmed with more rigourous analysis).
-
-*Is LoRA supported in `onebitllms`?*
-
-LoRA is not supported with this package and remains a very interesting research question. Unlocking LoRA with `onebitllms` could open-up exciting opportunities such as being able to fine-tune a BitNet 7B on a free-tier Google Colab instance.
-
-*Can `onebitllms` used for inference?*
-
-As of today, BitNet models are extremely interesting for CPU deployment. We strongly encourage users to deploy their models with [`bitnet.cpp`](https://github.com/microsoft/BitNet/) package after fine-tuning it with `onebitllms`. If you want to run it on GPU, to the best of our knowledge, you can use HuggingFace's `transformers` native integration of BitNet models.
-
-*Can I contribute to `onebitllms`?*
-
-Of course. Contributions to enhance the codebase, introduce new features and example scripts are strongly encouraged.
+LoRA không phải mục tiêu chính của package hiện tại. Có thể nghiên cứu thêm, nhưng cần kiểm tra kỹ tương tác giữa LoRA adapter, patch/unpatch layer, và export checkpoint.
 
 ## Citation
 
-If you find this work useful for your research and work, please consider citing us, as well as citing the foundational work behind BitNet models:
+Fork này dựa trên upstream `onebitllms` của Falcon-LLM Team. Nếu dùng cho nghiên cứu, hãy cite upstream và các công trình nền tảng về BitNet:
 
-```
+```bibtex
 @misc{tiionebitllms,
     title = {Falcon-E, a series of powerful, universal and fine-tunable 1.58bit language models.},
     author = {Falcon-LLM Team},
     month = {May},
-    url={https://github.com/tiiuae/onebitllms}, 
+    url = {https://github.com/tiiuae/onebitllms},
     year = {2025}
 }
 ```
 
-```
+```bibtex
 @misc{wang2025bitnetcppefficientedgeinference,
-      title={Bitnet.cpp: Efficient Edge Inference for Ternary LLMs}, 
-      author={Jinheng Wang and Hansong Zhou and Ting Song and Shijie Cao and Yan Xia and Ting Cao and Jianyu Wei and Shuming Ma and Hongyu Wang and Furu Wei},
-      year={2025},
-      eprint={2502.11880},
-      archivePrefix={arXiv},
-      primaryClass={cs.LG},
-      url={https://arxiv.org/abs/2502.11880}, 
+    title = {Bitnet.cpp: Efficient Edge Inference for Ternary LLMs},
+    author = {Jinheng Wang and Hansong Zhou and Ting Song and Shijie Cao and Yan Xia and Ting Cao and Jianyu Wei and Shuming Ma and Hongyu Wang and Furu Wei},
+    year = {2025},
+    eprint = {2502.11880},
+    archivePrefix = {arXiv},
+    primaryClass = {cs.LG},
+    url = {https://arxiv.org/abs/2502.11880}
 }
 ```
 
-```
-@misc{,
-      title={1.58-Bit LLM: A New Era of Extreme Quantization}, 
-      author={Mohamed Mekkouri and Marc Sun and Leandro von Werra and Thomas Wolf},
-      year={2024},
+```bibtex
+@misc{mekkouri2024bitllm,
+    title = {1.58-Bit LLM: A New Era of Extreme Quantization},
+    author = {Mohamed Mekkouri and Marc Sun and Leandro von Werra and Thomas Wolf},
+    year = {2024}
 }
 ```
 
-```
+```bibtex
 @misc{ma2024era1bitllmslarge,
-      title={The Era of 1-bit LLMs: All Large Language Models are in 1.58 Bits}, 
-      author={Shuming Ma and Hongyu Wang and Lingxiao Ma and Lei Wang and Wenhui Wang and Shaohan Huang and Li Dong and Ruiping Wang and Jilong Xue and Furu Wei},
-      year={2024},
-      eprint={2402.17764},
-      archivePrefix={arXiv},
-      primaryClass={cs.CL},
-      url={https://arxiv.org/abs/2402.17764}, 
+    title = {The Era of 1-bit LLMs: All Large Language Models are in 1.58 Bits},
+    author = {Shuming Ma and Hongyu Wang and Lingxiao Ma and Lei Wang and Wenhui Wang and Shaohan Huang and Li Dong and Ruiping Wang and Jilong Xue and Furu Wei},
+    year = {2024},
+    eprint = {2402.17764},
+    archivePrefix = {arXiv},
+    primaryClass = {cs.CL},
+    url = {https://arxiv.org/abs/2402.17764}
 }
 ```
 
-```
+```bibtex
 @misc{wang2023bitnetscaling1bittransformers,
-      title={BitNet: Scaling 1-bit Transformers for Large Language Models}, 
-      author={Hongyu Wang and Shuming Ma and Li Dong and Shaohan Huang and Huaijie Wang and Lingxiao Ma and Fan Yang and Ruiping Wang and Yi Wu and Furu Wei},
-      year={2023},
-      eprint={2310.11453},
-      archivePrefix={arXiv},
-      primaryClass={cs.CL},
-      url={https://arxiv.org/abs/2310.11453}, 
+    title = {BitNet: Scaling 1-bit Transformers for Large Language Models},
+    author = {Hongyu Wang and Shuming Ma and Li Dong and Shaohan Huang and Huaijie Wang and Lingxiao Ma and Fan Yang and Ruiping Wang and Yi Wu and Furu Wei},
+    year = {2023},
+    eprint = {2310.11453},
+    archivePrefix = {arXiv},
+    primaryClass = {cs.CL},
+    url = {https://arxiv.org/abs/2310.11453}
 }
 ```
