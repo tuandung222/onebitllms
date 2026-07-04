@@ -12,7 +12,9 @@ from onebitllms import (
     fake_quant_q2_0,
     fake_quant_q4_0,
     fake_quant_q4_1,
+    fake_quant_q8_0,
     fake_quant_q8_0_activation,
+    fake_quant_q8_1,
     replace_linear_with_llama_cpp_fake_quant_linear,
     replace_llama_cpp_fake_quant_linear_with_linear,
 )
@@ -73,6 +75,14 @@ def q8_0_activation_reference(x):
     inv_d = torch.where(d_raw != 0, 1.0 / d_raw, torch.zeros_like(d_raw))
     q = round_away_from_zero(xb * inv_d).clamp(-128.0, 127.0)
     return (q * d).reshape(orig_shape).to(x.dtype)
+
+
+def q8_0_reference(x):
+    return q8_0_activation_reference(x)
+
+
+def q8_1_reference(x):
+    return q8_0_activation_reference(x)
 
 
 class ToyExportModel(nn.Module):
@@ -147,6 +157,36 @@ def test_q4_1_matches_reference():
     assert torch.equal(actual, expected)
 
 
+def test_q8_0_matches_reference():
+    torch.manual_seed(7)
+    tensor = torch.randn(5, 96, dtype=torch.float32)
+
+    actual = fake_quant_q8_0(tensor, use_ste=False)
+    expected = q8_0_reference(tensor)
+
+    assert torch.equal(actual, expected)
+
+
+def test_q8_1_matches_reference():
+    torch.manual_seed(8)
+    tensor = torch.randn(5, 96, dtype=torch.float32)
+
+    actual = fake_quant_q8_1(tensor, use_ste=False)
+    expected = q8_1_reference(tensor)
+
+    assert torch.equal(actual, expected)
+
+
+def test_q8_0_and_q8_1_dequantized_values_match():
+    torch.manual_seed(9)
+    tensor = torch.randn(4, 128, dtype=torch.float32)
+
+    q8_0 = fake_quant_q8_0(tensor, use_ste=False)
+    q8_1 = fake_quant_q8_1(tensor, use_ste=False)
+
+    assert torch.equal(q8_0, q8_1)
+
+
 def test_q8_0_activation_matches_reference():
     torch.manual_seed(4)
     tensor = torch.randn(3, 2, 96, dtype=torch.float32)
@@ -196,6 +236,23 @@ def test_llama_cpp_fake_quant_linear_supports_q4_types():
     torch.manual_seed(3)
 
     for quant_type in ("Q4_0", "Q4_1"):
+        layer = LlamaCppFakeQuantLinear(96, 8, bias=True, quant_type=quant_type)
+        x = torch.randn(2, 96, dtype=torch.float32, requires_grad=True)
+
+        y = layer(x)
+        loss = y.square().mean()
+        loss.backward()
+
+        assert y.shape == (2, 8)
+        assert x.grad is not None
+        assert layer.weight.grad is not None
+        assert layer.quant_type == quant_type
+
+
+def test_llama_cpp_fake_quant_linear_supports_q8_weight_types():
+    torch.manual_seed(12)
+
+    for quant_type in ("Q8_0", "Q8_1"):
         layer = LlamaCppFakeQuantLinear(96, 8, bias=True, quant_type=quant_type)
         x = torch.randn(2, 96, dtype=torch.float32, requires_grad=True)
 
@@ -276,6 +333,24 @@ def test_replace_linear_with_llama_cpp_fake_quant_linear_supports_q8_0_activatio
     assert isinstance(model[2][1], nn.Linear)
     assert model[0].activation_quant == "Q8_0"
     assert model[2][0].activation_quant == "Q8_0"
+
+
+def test_replace_linear_with_llama_cpp_fake_quant_linear_supports_q8_weight_types():
+    for quant_type in ("Q8_0", "Q8_1"):
+        model = nn.Sequential(
+            nn.Linear(96, 16),
+            nn.ReLU(),
+            nn.Sequential(nn.Linear(64, 8), nn.Linear(30, 4)),
+        )
+
+        replaced = replace_linear_with_llama_cpp_fake_quant_linear(model, quant_type=quant_type)
+
+        assert replaced is model
+        assert isinstance(model[0], LlamaCppFakeQuantLinear)
+        assert isinstance(model[2][0], LlamaCppFakeQuantLinear)
+        assert isinstance(model[2][1], nn.Linear)
+        assert model[0].quant_type == quant_type
+        assert model[2][0].quant_type == quant_type
 
 
 def test_fake_quant_patch_unpatch_preserves_state_dict_keys_and_values():

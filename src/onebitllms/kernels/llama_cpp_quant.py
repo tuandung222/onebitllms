@@ -16,7 +16,7 @@
 These functions simulate quantize-dequantize noise for QAT. They do not pack
 GGUF bytes and they are not inference kernels. The formulas intentionally mirror
 the deterministic llama.cpp reference quantizers for Q1_0, Q2_0, Q4_0, Q4_1,
-and Q8_0 activation fake quantization.
+Q8_0, Q8_1, and Q8_0 activation fake quantization.
 """
 
 from __future__ import annotations
@@ -157,19 +157,7 @@ def fake_quant_q4_1(x: torch.Tensor, *, use_ste: bool = True) -> torch.Tensor:
     return _quantize_ste(x, xq) if use_ste else xq
 
 
-def fake_quant_q8_0_activation(x: torch.Tensor, *, use_ste: bool = True) -> torch.Tensor:
-    """Fake quantize activations with the llama.cpp Q8_0 quantize-dequantize rule.
-
-    Per 32-value block:
-
-    - compute ``d_raw = max(abs(x)) / 127``;
-    - store/decode ``d = fp16(d_raw)``;
-    - encode signed int8 codes with C/C++ ``roundf(x / d_raw)`` semantics;
-    - dequantize with ``q * d``.
-
-    This is intended for transient QAT activation noise. It does not mean
-    activations are stored in GGUF.
-    """
+def _fake_quant_q8_0_like(x: torch.Tensor) -> torch.Tensor:
     xb, orig_shape = _as_float_blocks(x, Q8_BLOCK_SIZE)
     d_raw = xb.abs().max(dim=-1, keepdim=True).values / 127.0
     d = _fp16_round(d_raw)
@@ -178,5 +166,45 @@ def fake_quant_q8_0_activation(x: torch.Tensor, *, use_ste: bool = True) -> torc
     q = _round_away_from_zero(xb * inv_d)
     q = torch.clamp(q, -128.0, 127.0)
     xq = q * d
-    xq = _restore_blocks(xq, orig_shape, x.dtype)
+    return _restore_blocks(xq, orig_shape, x.dtype)
+
+
+def fake_quant_q8_0(x: torch.Tensor, *, use_ste: bool = True) -> torch.Tensor:
+    """Fake quantize weights with the llama.cpp Q8_0 quantize-dequantize rule.
+
+    Per 32-value block:
+
+    - compute ``d_raw = max(abs(x)) / 127``;
+    - store/decode ``d = fp16(d_raw)``;
+    - encode signed int8 codes with C/C++ ``roundf(x / d_raw)`` semantics;
+    - dequantize with ``q * d``.
+
+    Q8_0 is a user-facing llama.cpp/GGUF model quantization target.
+    """
+    xq = _fake_quant_q8_0_like(x)
+    return _quantize_ste(x, xq) if use_ste else xq
+
+
+def fake_quant_q8_1(x: torch.Tensor, *, use_ste: bool = True) -> torch.Tensor:
+    """Fake quantize weights with the ggml Q8_1 block quantization rule.
+
+    ``block_q8_1`` stores the same fp16 scale and int8 codes as Q8_0, plus an
+    extra fp16 ``s = d * sum(qs)`` used by ggml vector-dot kernels. The
+    dequantized value seen by QAT remains ``q * d``, so this fake quantizer
+    intentionally returns the same tensor values as Q8_0.
+
+    llama.cpp exposes Q8_0 through ``llama-quantize``; Q8_1 is a
+    runtime/dot-product format, not a normal model export target.
+    """
+    xq = _fake_quant_q8_0_like(x)
+    return _quantize_ste(x, xq) if use_ste else xq
+
+
+def fake_quant_q8_0_activation(x: torch.Tensor, *, use_ste: bool = True) -> torch.Tensor:
+    """Fake quantize activations with the llama.cpp Q8_0 quantize-dequantize rule.
+
+    This is intended for transient QAT activation noise. It does not mean
+    activations are stored in GGUF.
+    """
+    xq = _fake_quant_q8_0_like(x)
     return _quantize_ste(x, xq) if use_ste else xq

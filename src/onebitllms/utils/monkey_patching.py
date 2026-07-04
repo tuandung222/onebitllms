@@ -101,7 +101,8 @@ def replace_linear_with_llama_cpp_fake_quant_linear(
         model:
             Model containing ``nn.Linear`` modules.
         quant_type:
-            ``"Q1_0"``, ``"Q2_0"``, ``"Q4_0"``, or ``"Q4_1"``.
+            ``"Q1_0"``, ``"Q2_0"``, ``"Q4_0"``, ``"Q4_1"``,
+            ``"Q8_0"``, or ``"Q8_1"``.
         target_names:
             Optional name substrings. If provided, only child module names
             containing at least one target substring are replaced.
@@ -114,7 +115,7 @@ def replace_linear_with_llama_cpp_fake_quant_linear(
         skip_if_not_divisible_by:
             Skip linears whose input feature dimension is not divisible by the
             llama.cpp block size. Defaults to 128 for Q1_0/Q2_0 and 32 for
-            Q4_0/Q4_1.
+            Q4_0/Q4_1/Q8_0/Q8_1.
 
     Returns:
         The input model, modified in-place.
@@ -122,7 +123,7 @@ def replace_linear_with_llama_cpp_fake_quant_linear(
     quant_key = quant_type.upper()
     activation_quant_key = activation_quant.upper() if activation_quant is not None else None
     if skip_if_not_divisible_by is None:
-        block_sizes = {"Q1_0": 128, "Q2_0": 128, "Q4_0": 32, "Q4_1": 32}
+        block_sizes = {"Q1_0": 128, "Q2_0": 128, "Q4_0": 32, "Q4_1": 32, "Q8_0": 32, "Q8_1": 32}
         if quant_key not in block_sizes:
             allowed = ", ".join(sorted(block_sizes))
             raise ValueError(f"unsupported llama.cpp fake quant type {quant_type!r}; allowed: {allowed}")

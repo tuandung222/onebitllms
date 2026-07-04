@@ -26,7 +26,9 @@ from onebitllms.kernels import (
     fake_quant_q2_0,
     fake_quant_q4_0,
     fake_quant_q4_1,
+    fake_quant_q8_0,
     fake_quant_q8_0_activation,
+    fake_quant_q8_1,
 )
 
 
@@ -35,6 +37,8 @@ _WEIGHT_QUANTIZERS = {
     "Q2_0": fake_quant_q2_0,
     "Q4_0": fake_quant_q4_0,
     "Q4_1": fake_quant_q4_1,
+    "Q8_0": fake_quant_q8_0,
+    "Q8_1": fake_quant_q8_1,
 }
 
 _QUANT_BLOCK_SIZES = {
@@ -42,6 +46,8 @@ _QUANT_BLOCK_SIZES = {
     "Q2_0": 128,
     "Q4_0": 32,
     "Q4_1": 32,
+    "Q8_0": 32,
+    "Q8_1": 32,
 }
 
 _ACTIVATION_QUANTIZERS = {

@@ -16,7 +16,9 @@ from .llama_cpp_quant import (
     fake_quant_q2_0,
     fake_quant_q4_0,
     fake_quant_q4_1,
+    fake_quant_q8_0,
     fake_quant_q8_0_activation,
+    fake_quant_q8_1,
 )
 
 

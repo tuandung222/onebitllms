@@ -109,21 +109,28 @@ They are not llama.cpp GGUF packing kernels. On GPU training setups, Triton is
 the right direction for speed, but the quantization formula should be validated
 first with a deterministic PyTorch reference.
 
-### Using llama.cpp fake quantizers
+### Sử dụng llama.cpp fake quantizers
 
-This fork also exposes weight-only fake quantizers that mirror the deterministic
-`prism-llama-cpp` / `ggml` quantize-dequantize formulas:
+Fork này cung cấp thêm các fake quantizer cho weight, bám theo công thức
+quantize-dequantize xác định trong `prism-llama-cpp` / `ggml`:
 
 ```python
-from onebitllms import fake_quant_q1_0, fake_quant_q2_0, fake_quant_q4_0, fake_quant_q4_1
+from onebitllms import (
+    fake_quant_q1_0,
+    fake_quant_q2_0,
+    fake_quant_q4_0,
+    fake_quant_q4_1,
+    fake_quant_q8_0,
+)
 
 w_q1 = fake_quant_q1_0(weight)
 w_q2 = fake_quant_q2_0(weight)
 w_q4 = fake_quant_q4_0(weight)
 w_q41 = fake_quant_q4_1(weight)
+w_q8 = fake_quant_q8_0(weight)
 ```
 
-For model surgery, replace compatible `nn.Linear` layers in-place:
+Để thay layer trong model, có thể replace trực tiếp các `nn.Linear` tương thích:
 
 ```python
 from onebitllms import replace_linear_with_llama_cpp_fake_quant_linear
@@ -131,7 +138,7 @@ from onebitllms import replace_linear_with_llama_cpp_fake_quant_linear
 model = replace_linear_with_llama_cpp_fake_quant_linear(model, quant_type="Q2_0")
 ```
 
-You can also inject transient Q8_0 activation fake quantization during QAT:
+Có thể bật thêm fake quant activation `Q8_0` tạm thời trong quá trình QAT:
 
 ```python
 model = replace_linear_with_llama_cpp_fake_quant_linear(
@@ -141,8 +148,8 @@ model = replace_linear_with_llama_cpp_fake_quant_linear(
 )
 ```
 
-After QAT, convert fake-quant wrappers back to standard `nn.Linear` before
-saving a Hugging Face checkpoint or exporting to GGUF:
+Sau QAT, hãy chuyển wrapper fake quant về lại `nn.Linear` chuẩn trước khi lưu
+checkpoint Hugging Face hoặc export sang GGUF:
 
 ```python
 from onebitllms import replace_llama_cpp_fake_quant_linear_with_linear
@@ -151,34 +158,46 @@ model = replace_llama_cpp_fake_quant_linear_with_linear(model)
 model.save_pretrained(output_dir)
 ```
 
-Supported types:
+Các kiểu weight fake quant đang hỗ trợ:
 
-| Type | Block size | Formula source | Notes |
+| Type | Block size | Nguồn công thức | Ghi chú |
 | --- | ---: | --- | --- |
-| `Q1_0` | 128 | `prism-llama-cpp` `quantize_row_q1_0_ref` | 1 sign bit plus fp16 block scale |
-| `Q2_0` | 128 | `prism-llama-cpp` `quantize_row_q2_0_ref` | 2-bit codes with C/C++ `std::round` semantics |
-| `Q4_0` | 32 | llama.cpp `quantize_row_q4_0_ref` | signed absmax block quantization |
-| `Q4_1` | 32 | llama.cpp `quantize_row_q4_1_ref` | min/max affine block quantization |
+| `Q1_0` | 128 | `prism-llama-cpp` `quantize_row_q1_0_ref` | 1 sign bit và fp16 scale theo block |
+| `Q2_0` | 128 | `prism-llama-cpp` `quantize_row_q2_0_ref` | mã 2-bit với ngữ nghĩa `std::round` của C/C++ |
+| `Q4_0` | 32 | llama.cpp `quantize_row_q4_0_ref` | block quantization theo signed absmax |
+| `Q4_1` | 32 | llama.cpp `quantize_row_q4_1_ref` | block quantization affine theo min/max |
+| `Q8_0` | 32 | llama.cpp `quantize_row_q8_0_ref` / `dequantize_row_q8_0` | target GGUF thật, dùng được với `llama-quantize Q8_0` |
+| `Q8_1` | 32 | ggml `quantize_row_q8_1_ref` | format runtime/vector-dot; không phải target export model thông thường của `llama-quantize` |
 
-Supported activation fake quantizers:
+Các kiểu activation fake quant đang hỗ trợ:
 
-| Type | Block size | Formula source | Notes |
+| Type | Block size | Nguồn công thức | Ghi chú |
 | --- | ---: | --- | --- |
-| `Q8_0` | 32 | llama.cpp `quantize_row_q8_0_ref` | transient int8 activation noise for QAT |
+| `Q8_0` | 32 | llama.cpp `quantize_row_q8_0_ref` | nhiễu int8 activation tạm thời cho QAT |
 
-These layers keep floating-point trainable weights, apply quantize-dequantize
-noise in the forward pass, and use straight-through gradients for QAT. They do
-not export GGUF files and they are not inference kernels. Activation fake
-quantization is optional and does not mean activations are stored in GGUF. The
-intended flow is:
+Các layer này vẫn giữ weight trainable ở floating-point, áp dụng nhiễu
+quantize-dequantize trong forward pass, và dùng straight-through gradient cho
+QAT. Chúng không export file GGUF và không phải inference kernel. Activation
+fake quantization là tùy chọn và không có nghĩa activation được lưu trong GGUF.
+Luồng sử dụng dự kiến:
 
 ```text
-QAT with fake quantized PyTorch weights
--> save HF checkpoint
--> convert HF checkpoint to F16/BF16 GGUF
--> run llama-quantize with Q1_0/Q2_0/Q4_0/Q4_1
--> run inference with llama.cpp / prism-llama-cpp
+QAT với PyTorch weight được fake quant
+-> lưu HF checkpoint
+-> convert HF checkpoint sang F16/BF16 GGUF
+-> chạy llama-quantize với Q1_0/Q2_0/Q4_0/Q4_1/Q8_0
+-> inference bằng llama.cpp / prism-llama-cpp
 ```
+
+Với QAT 8-bit để chạy inference desktop, nên ưu tiên `quant_type="Q8_0"` vì
+`prism-llama-cpp/tools/quantize` expose `Q8_0` như một mode quantize model.
+`Q8_1` tồn tại trong ggml như block quantized dùng cho các đường vector-dot;
+nhiễu QAT sau dequant cũng là `q * d` như Q8_0, nhưng nên xem là fake quantizer
+experimental/runtime-style nếu export path chưa hỗ trợ tensor Q8_1 rõ ràng.
+
+`Q8_K` cũng xuất hiện trong ggml như format K-quant/vector-dot nội bộ, nhưng
+không được expose như mode `llama-quantize` thông thường trong fork này. Vì vậy
+package chưa expose `Q8_K` như một QAT target.
 
 ### Revert back to bfloat16 format
 
