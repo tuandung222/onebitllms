@@ -29,6 +29,7 @@ Các layer fake quant trong fork này không phải inference kernel và không 
 | Triton quant kernels | Có | Phục vụ đường BitNet training, không phải GGUF packing |
 | llama.cpp fake quant weight | Có | `Q1_0`, `Q2_0`, `Q4_0`, `Q4_1`, `Q8_0`, `Q8_1` |
 | llama.cpp fake quant activation | Có | `activation_quant="Q8_0"` như nhiễu tạm thời trong QAT |
+| Triton fast path cho llama.cpp QAT | Experimental | Hiện có `Q8_0` CUDA fast path, default vẫn là PyTorch |
 | Patch/unpatch `nn.Linear` | Có | Dùng để train bằng wrapper rồi export checkpoint chuẩn |
 | GGUF export trực tiếp | Không | Dùng converter và `llama-quantize` của llama.cpp |
 | Inference kernel | Không | Inference chạy bằng llama.cpp / prism-llama-cpp / bitnet.cpp |
@@ -114,6 +115,31 @@ model.save_pretrained("output-hf-checkpoint")
 ```
 
 Không nên lưu checkpoint HF khi model vẫn còn `LlamaCppFakeQuantLinear`, vì converter của llama.cpp kỳ vọng cấu trúc module/weight chuẩn.
+
+### 5. Dùng Triton fast path cho Q8_0
+
+Default backend là `torch` để giữ tính portable và deterministic. Nếu train trên CUDA và đã cài Triton, có thể bật fast path cho `Q8_0`:
+
+```python
+model = replace_linear_with_llama_cpp_fake_quant_linear(
+    model,
+    quant_type="Q8_0",
+    activation_quant="Q8_0",
+    backend="auto",
+)
+```
+
+Các backend:
+
+- `backend="torch"`: luôn dùng PyTorch reference.
+- `backend="auto"`: dùng Triton cho CUDA `Q8_0` nếu có thể, fallback về PyTorch khi không hỗ trợ.
+- `backend="triton"`: bắt buộc dùng Triton, hiện chỉ hỗ trợ `Q8_0`.
+
+Trước khi dùng `backend="triton"` cho training thật, hãy chạy script validation trên máy GPU:
+
+```bash
+PYTHONPATH=src python scripts/check_llama_cpp_q8_0_triton.py --benchmark
+```
 
 ## Các kiểu llama.cpp fake quant đang hỗ trợ
 
@@ -211,6 +237,26 @@ summary: max_error=0 mismatches=0
 
 Nếu có bất kỳ mismatch nào, không được xem `Q8_0` fake quant là tương thích công thức.
 
+### Q8_0 Triton validation
+
+Trên máy có CUDA/Triton:
+
+```bash
+PYTHONPATH=src python scripts/check_llama_cpp_q8_0_triton.py --benchmark
+```
+
+Trong môi trường CPU-only, có thể kiểm tra script không phá workflow bằng:
+
+```bash
+PYTHONPATH=src python scripts/check_llama_cpp_q8_0_triton.py --allow-missing-cuda
+```
+
+Điều kiện pass trên GPU vẫn là:
+
+```text
+summary: max_error=0 mismatches=0
+```
+
 ## BitNet / 1.58-bit fine-tuning
 
 Đường BitNet gốc của upstream vẫn được giữ lại. Ví dụ fine-tune từ checkpoint pre-quantized:
@@ -299,6 +345,7 @@ docs/
 
 scripts/
   check_llama_cpp_q8_0_alignment.py
+  check_llama_cpp_q8_0_triton.py
 ```
 
 ## Tài liệu chi tiết
@@ -311,6 +358,7 @@ scripts/
 - Fake quant đúng công thức không đảm bảo checkpoint QAT sẽ tốt hơn PTQ-only. Cần eval chất lượng riêng.
 - `activation_quant="Q8_0"` không có nghĩa activation được lưu trong GGUF.
 - `Q8_1` và `Q8_K` không nên được quảng bá như target export GGUF thông thường trong fork hiện tại.
+- Triton fast path hiện mới có cho `Q8_0`; các kiểu `Q4_0/Q4_1` vẫn dùng PyTorch reference.
 - Trước khi export HF checkpoint sang GGUF, phải unpatch wrapper fake quant về `nn.Linear`.
 - Nếu target là một kiểu quantize khác của llama.cpp, fake quant trong QAT nên khớp đúng công thức của target đó.
 

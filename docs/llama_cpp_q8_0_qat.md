@@ -75,6 +75,25 @@ model = replace_linear_with_llama_cpp_fake_quant_linear(
 )
 ```
 
+Nếu train trên CUDA và đã cài Triton, có thể bật fast path experimental cho `Q8_0`:
+
+```python
+model = replace_linear_with_llama_cpp_fake_quant_linear(
+    model,
+    quant_type="Q8_0",
+    activation_quant="Q8_0",
+    backend="auto",
+)
+```
+
+Các backend:
+
+- `backend="torch"`: dùng PyTorch reference, là default.
+- `backend="auto"`: dùng Triton cho CUDA `Q8_0` nếu có thể, fallback về PyTorch.
+- `backend="triton"`: bắt buộc dùng Triton, hiện chỉ hỗ trợ `Q8_0`.
+
+Triton fast path chỉ là tối ưu tốc độ cho fake quant trong QAT, không phải GGUF packing kernel và không phải inference kernel.
+
 Trước khi lưu checkpoint để export GGUF, phải chuyển wrapper về `nn.Linear`:
 
 ```python
@@ -119,8 +138,8 @@ Một thay đổi `Q8_0` chỉ nên được xem là hợp lệ nếu đạt cá
 | Công thức tensor | `fake_quant_q8_0(..., use_ste=False)` khớp reference PyTorch cho nhiều shape/block |
 | Rounding | Case half tie khớp C/C++ `roundf` |
 | GGUF alignment | Dequant từ `gguf-py` `Q8_0` khớp fake quant với `max_error = 0` và `mismatches = 0` |
+| Triton alignment | `fake_quant_q8_0_triton` khớp PyTorch reference với `max_error = 0` và `mismatches = 0` trên CUDA |
 | Layer wrapper | Forward/backward chạy, gradient đi qua STE, output shape đúng |
 | Model surgery | Patch/unpatch không đổi key trong `state_dict`, không replace `lm_head` nếu cấu hình skip |
 | Export path | HF checkpoint sau unpatch convert được sang GGUF và `llama-quantize Q8_0` chạy thành công |
 | Inference | `llama-cli` load được GGUF Q8_0 và sinh text ổn định với prompt cố định |
-

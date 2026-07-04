@@ -14,6 +14,7 @@ from onebitllms import (
     fake_quant_q4_1,
     fake_quant_q8_0,
     fake_quant_q8_0_activation,
+    fake_quant_q8_0_triton,
     fake_quant_q8_1,
     replace_linear_with_llama_cpp_fake_quant_linear,
     replace_llama_cpp_fake_quant_linear_with_linear,
@@ -187,6 +188,21 @@ def test_q8_0_and_q8_1_dequantized_values_match():
     assert torch.equal(q8_0, q8_1)
 
 
+def test_q8_0_triton_matches_torch_when_cuda_available():
+    if not torch.cuda.is_available():
+        return
+    torch.manual_seed(13)
+    tensor = (torch.randn(7, 96, dtype=torch.float32, device="cuda") * 2.0).contiguous()
+
+    try:
+        actual = fake_quant_q8_0_triton(tensor, use_ste=False)
+    except ModuleNotFoundError:
+        return
+    expected = fake_quant_q8_0(tensor, use_ste=False)
+
+    assert torch.equal(actual.cpu(), expected.cpu())
+
+
 def test_q8_0_activation_matches_reference():
     torch.manual_seed(4)
     tensor = torch.randn(3, 2, 96, dtype=torch.float32)
@@ -264,6 +280,35 @@ def test_llama_cpp_fake_quant_linear_supports_q8_weight_types():
         assert x.grad is not None
         assert layer.weight.grad is not None
         assert layer.quant_type == quant_type
+
+
+def test_llama_cpp_fake_quant_linear_auto_backend_falls_back_on_cpu():
+    torch.manual_seed(14)
+    layer = LlamaCppFakeQuantLinear(96, 8, bias=True, quant_type="Q8_0", backend="auto")
+    x = torch.randn(2, 96, dtype=torch.float32, requires_grad=True)
+
+    y = layer(x)
+    loss = y.square().mean()
+    loss.backward()
+
+    assert y.shape == (2, 8)
+    assert x.grad is not None
+    assert layer.weight.grad is not None
+    assert layer.backend == "auto"
+
+
+def test_llama_cpp_fake_quant_linear_triton_backend_supports_q8_0_only():
+    layer = LlamaCppFakeQuantLinear(96, 8, bias=True, quant_type="Q8_0", backend="triton")
+
+    assert layer.backend == "triton"
+    assert layer.quant_type == "Q8_0"
+
+    try:
+        LlamaCppFakeQuantLinear(96, 8, bias=True, quant_type="Q4_0", backend="triton")
+    except ValueError as exc:
+        assert "backend='triton'" in str(exc)
+    else:
+        raise AssertionError("expected unsupported Triton quant type to fail")
 
 
 def test_llama_cpp_fake_quant_linear_supports_q8_0_activation_quant():
@@ -351,6 +396,22 @@ def test_replace_linear_with_llama_cpp_fake_quant_linear_supports_q8_weight_type
         assert isinstance(model[2][1], nn.Linear)
         assert model[0].quant_type == quant_type
         assert model[2][0].quant_type == quant_type
+
+
+def test_replace_linear_with_llama_cpp_fake_quant_linear_propagates_backend():
+    model = nn.Sequential(
+        nn.Linear(96, 16),
+        nn.ReLU(),
+        nn.Sequential(nn.Linear(64, 8), nn.Linear(30, 4)),
+    )
+
+    replaced = replace_linear_with_llama_cpp_fake_quant_linear(model, quant_type="Q8_0", backend="auto")
+
+    assert replaced is model
+    assert isinstance(model[0], LlamaCppFakeQuantLinear)
+    assert isinstance(model[2][0], LlamaCppFakeQuantLinear)
+    assert model[0].backend == "auto"
+    assert model[2][0].backend == "auto"
 
 
 def test_fake_quant_patch_unpatch_preserves_state_dict_keys_and_values():

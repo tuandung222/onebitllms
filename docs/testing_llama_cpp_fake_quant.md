@@ -11,6 +11,7 @@ Các thành phần được kiểm thử:
 - Wrapper layer: `LlamaCppFakeQuantLinear`.
 - Model surgery: patch `nn.Linear` sang fake quant wrapper và unpatch về `nn.Linear`.
 - Alignment với `prism-llama-cpp/gguf-py`, ưu tiên `Q8_0` vì đây là target export 8-bit thật của `llama-quantize`.
+- Triton fast path cho `Q8_0` trên CUDA.
 
 ## Test pyramid
 
@@ -21,9 +22,11 @@ Chạy:
 ```bash
 PYTHONPATH=src python -m py_compile \
   src/onebitllms/kernels/llama_cpp_quant.py \
+  src/onebitllms/kernels/llama_cpp_quant_triton.py \
   src/onebitllms/layers/llama_cpp.py \
   src/onebitllms/utils/monkey_patching.py \
-  tests/test_llama_cpp_fake_quant.py
+  tests/test_llama_cpp_fake_quant.py \
+  scripts/check_llama_cpp_q8_0_triton.py
 
 git diff --check
 ```
@@ -86,7 +89,29 @@ summary: max_error=0 mismatches=0
 
 Nếu `max_error > 0` hoặc `mismatches > 0`, không được xem implementation `Q8_0` là tương thích.
 
-### L3: Smoke test QAT layer
+### L3a: Q8_0 Triton fast path
+
+Trên máy có CUDA/Triton, chạy:
+
+```bash
+PYTHONPATH=src python scripts/check_llama_cpp_q8_0_triton.py --benchmark
+```
+
+Trong môi trường CPU-only, chỉ dùng lệnh sau để xác nhận script không phá workflow:
+
+```bash
+PYTHONPATH=src python scripts/check_llama_cpp_q8_0_triton.py --allow-missing-cuda
+```
+
+Điều kiện pass trên GPU:
+
+```text
+summary: max_error=0 mismatches=0
+```
+
+Nếu `max_error > 0` hoặc `mismatches > 0`, không được bật `backend="triton"` cho training thật. Khi chưa có GPU validation, chỉ nên dùng `backend="torch"` hoặc `backend="auto"` với fallback PyTorch.
+
+### L3b: Smoke test QAT layer
 
 Mục tiêu là đảm bảo wrapper dùng được trong train loop nhỏ.
 
@@ -154,6 +179,7 @@ Khuyến nghị:
 | Layer forward/backward | Bắt lỗi integration trong `nn.Module` |
 | Patch/unpatch | Bắt lỗi export lifecycle |
 | gguf-py exact alignment | Bắt lỗi lệch với llama.cpp reference implementation |
+| Triton exact alignment | Bắt lỗi lệch giữa CUDA fast path và PyTorch reference |
 
 ## Những điều không được tuyên bố quá mức
 
@@ -161,4 +187,4 @@ Khuyến nghị:
 - Activation fake quant `Q8_0` không có nghĩa activation được lưu trong GGUF.
 - `Q8_1` không phải target `llama-quantize` thông thường trong fork hiện tại.
 - `Q8_K` chưa được expose trong `onebitllms` vì chưa phải target export chính của fork này.
-
+- Triton fast path hiện mới có cho `Q8_0`; `Q4_0/Q4_1` vẫn phải đi qua PyTorch reference.

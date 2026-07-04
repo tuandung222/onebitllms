@@ -28,6 +28,7 @@ from onebitllms.kernels import (
     fake_quant_q4_1,
     fake_quant_q8_0,
     fake_quant_q8_0_activation,
+    fake_quant_q8_0_triton,
     fake_quant_q8_1,
 )
 
@@ -54,6 +55,16 @@ _ACTIVATION_QUANTIZERS = {
     "Q8_0": fake_quant_q8_0_activation,
 }
 
+_TRITON_WEIGHT_QUANTIZERS = {
+    "Q8_0": fake_quant_q8_0_triton,
+}
+
+_TRITON_ACTIVATION_QUANTIZERS = {
+    "Q8_0": fake_quant_q8_0_triton,
+}
+
+_ALLOWED_BACKENDS = {"torch", "triton", "auto"}
+
 
 class LlamaCppFakeQuantLinear(nn.Module):
     """nn.Linear equivalent with llama.cpp weight fake quantization.
@@ -72,12 +83,20 @@ class LlamaCppFakeQuantLinear(nn.Module):
         quant_type: str = "Q4_0",
         activation_quant: Optional[str] = None,
         accumulator_dtype: Optional[torch.dtype] = torch.float32,
+        backend: str = "torch",
     ) -> None:
         super().__init__()
+        backend_key = backend.lower()
+        if backend_key not in _ALLOWED_BACKENDS:
+            allowed = ", ".join(sorted(_ALLOWED_BACKENDS))
+            raise ValueError(f"unsupported fake quant backend {backend!r}; allowed: {allowed}")
         quant_key = quant_type.upper()
         if quant_key not in _WEIGHT_QUANTIZERS:
             allowed = ", ".join(sorted(_WEIGHT_QUANTIZERS))
             raise ValueError(f"unsupported llama.cpp fake quant type {quant_type!r}; allowed: {allowed}")
+        if backend_key == "triton" and quant_key not in _TRITON_WEIGHT_QUANTIZERS:
+            allowed = ", ".join(sorted(_TRITON_WEIGHT_QUANTIZERS))
+            raise ValueError(f"backend='triton' currently supports weight quant types: {allowed}")
         block_size = _QUANT_BLOCK_SIZES[quant_key]
         if in_features % block_size != 0:
             raise ValueError(
@@ -89,6 +108,10 @@ class LlamaCppFakeQuantLinear(nn.Module):
             raise ValueError(
                 f"unsupported llama.cpp activation fake quant type {activation_quant!r}; allowed: {allowed}"
             )
+        if backend_key == "triton" and activation_quant_key is not None:
+            if activation_quant_key not in _TRITON_ACTIVATION_QUANTIZERS:
+                allowed = ", ".join(sorted(_TRITON_ACTIVATION_QUANTIZERS))
+                raise ValueError(f"backend='triton' currently supports activation quant types: {allowed}")
         if activation_quant_key == "Q8_0" and in_features % 32 != 0:
             raise ValueError(f"in_features={in_features} must be divisible by 32 for Q8_0 activation fake quantization")
 
@@ -97,6 +120,7 @@ class LlamaCppFakeQuantLinear(nn.Module):
         self.quant_type = quant_key
         self.activation_quant = activation_quant_key
         self.accumulator_dtype = accumulator_dtype
+        self.backend = backend_key
 
         self.weight = nn.Parameter(torch.empty(out_features, in_features))
         if bias:
@@ -120,6 +144,7 @@ class LlamaCppFakeQuantLinear(nn.Module):
         quant_type: str = "Q4_0",
         activation_quant: Optional[str] = None,
         accumulator_dtype: Optional[torch.dtype] = torch.float32,
+        backend: str = "torch",
     ) -> "LlamaCppFakeQuantLinear":
         wrapped = cls(
             layer.in_features,
@@ -128,6 +153,7 @@ class LlamaCppFakeQuantLinear(nn.Module):
             quant_type=quant_type,
             activation_quant=activation_quant,
             accumulator_dtype=accumulator_dtype,
+            backend=backend,
         )
         wrapped.weight.data.copy_(layer.weight.data)
         wrapped.weight.requires_grad_(layer.weight.requires_grad)
@@ -137,13 +163,35 @@ class LlamaCppFakeQuantLinear(nn.Module):
         wrapped.train(layer.training)
         return wrapped.to(device=layer.weight.device, dtype=layer.weight.dtype)
 
+    def _select_quantizer(self, quant_type: str, *, activation: bool, tensor: torch.Tensor):
+        if activation:
+            torch_quantizers = _ACTIVATION_QUANTIZERS
+            triton_quantizers = _TRITON_ACTIVATION_QUANTIZERS
+        else:
+            torch_quantizers = _WEIGHT_QUANTIZERS
+            triton_quantizers = _TRITON_WEIGHT_QUANTIZERS
+
+        if self.backend == "triton":
+            return triton_quantizers[quant_type]
+        if self.backend == "auto" and tensor.is_cuda and quant_type in triton_quantizers:
+            return triton_quantizers[quant_type]
+        return torch_quantizers[quant_type]
+
+    def _apply_quantizer(self, quant_type: str, tensor: torch.Tensor, *, activation: bool) -> torch.Tensor:
+        quantizer = self._select_quantizer(quant_type, activation=activation, tensor=tensor)
+        try:
+            return quantizer(tensor)
+        except ModuleNotFoundError:
+            if self.backend == "auto":
+                fallback = _ACTIVATION_QUANTIZERS[quant_type] if activation else _WEIGHT_QUANTIZERS[quant_type]
+                return fallback(tensor)
+            raise
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.activation_quant is not None:
-            activation_quantizer = _ACTIVATION_QUANTIZERS[self.activation_quant]
-            x = activation_quantizer(x)
+            x = self._apply_quantizer(self.activation_quant, x, activation=True)
 
-        weight_quantizer = _WEIGHT_QUANTIZERS[self.quant_type]
-        w = weight_quantizer(self.weight)
+        w = self._apply_quantizer(self.quant_type, self.weight, activation=False)
 
         if self.accumulator_dtype is not None:
             out = F.linear(
@@ -175,5 +223,5 @@ class LlamaCppFakeQuantLinear(nn.Module):
         return (
             f"LlamaCppFakeQuantLinear(in_features={self.in_features}, "
             f"out_features={self.out_features}, quant_type={self.quant_type}, "
-            f"activation_quant={self.activation_quant})"
+            f"activation_quant={self.activation_quant}, backend={self.backend})"
         )

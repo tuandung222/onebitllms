@@ -93,6 +93,7 @@ def replace_linear_with_llama_cpp_fake_quant_linear(
     skip_names: tuple[str, ...] = ("lm_head",),
     activation_quant: Optional[str] = None,
     accumulator_dtype: Optional[torch.dtype] = torch.float32,
+    backend: str = "torch",
     skip_if_not_divisible_by: Optional[int] = None,
 ):
     """Recursively replace nn.Linear layers with llama.cpp fake-quant layers.
@@ -112,6 +113,10 @@ def replace_linear_with_llama_cpp_fake_quant_linear(
             Optional activation fake quantizer. Currently supports ``"Q8_0"``.
         accumulator_dtype:
             Optional dtype used for ``F.linear`` accumulation in the wrapper.
+        backend:
+            Fake quant backend. ``"torch"`` is the deterministic default,
+            ``"triton"`` currently supports Q8_0 CUDA tensors, and ``"auto"``
+            uses Triton for supported CUDA Q8_0 paths with PyTorch fallback.
         skip_if_not_divisible_by:
             Skip linears whose input feature dimension is not divisible by the
             llama.cpp block size. Defaults to 128 for Q1_0/Q2_0 and 32 for
@@ -142,6 +147,7 @@ def replace_linear_with_llama_cpp_fake_quant_linear(
                 skip_names=skip_names,
                 activation_quant=activation_quant_key,
                 accumulator_dtype=accumulator_dtype,
+                backend=backend,
                 skip_if_not_divisible_by=skip_if_not_divisible_by,
             )
 
@@ -157,6 +163,7 @@ def replace_linear_with_llama_cpp_fake_quant_linear(
             quant_type=quant_key,
             activation_quant=activation_quant_key,
             accumulator_dtype=accumulator_dtype,
+            backend=backend,
         )
         setattr(model, name, new_layer)
     return model

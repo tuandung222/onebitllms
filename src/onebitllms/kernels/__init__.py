@@ -43,3 +43,10 @@ except ModuleNotFoundError as exc:
     if exc.name != "triton":
         raise
     weight_quant_triton = _missing_triton_kernel
+
+try:
+    from .llama_cpp_quant_triton import fake_quant_q8_0_triton
+except ModuleNotFoundError as exc:
+    if exc.name != "triton":
+        raise
+    fake_quant_q8_0_triton = _missing_triton_kernel

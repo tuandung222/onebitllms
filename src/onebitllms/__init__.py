@@ -19,6 +19,7 @@ from .kernels import (
     fake_quant_q4_1,
     fake_quant_q8_0,
     fake_quant_q8_0_activation,
+    fake_quant_q8_0_triton,
     fake_quant_q8_1,
     weight_quant_triton,
 )
