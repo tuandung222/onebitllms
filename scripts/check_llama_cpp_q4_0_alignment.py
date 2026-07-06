@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check onebitllms Q8_0 fake quantization against prism-llama-cpp gguf-py."""
+"""Check onebitllms Q4_0 fake quantization against prism-llama-cpp gguf-py."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from onebitllms import fake_quant_q8_0
+from onebitllms import fake_quant_q4_0
 
 
 def _default_prism_llama_cpp() -> Path | None:
@@ -47,12 +47,20 @@ def _case_tensors(seed: int) -> list[tuple[str, torch.Tensor]]:
         ("random_3x96", torch.randn((3, 96), generator=generator, dtype=torch.float32) * 2.5),
         ("random_9x128", torch.randn((9, 128), generator=generator, dtype=torch.float32) * 3.0),
         ("zeros_2x64", torch.zeros((2, 64), dtype=torch.float32)),
-        ("constant_2x32", torch.full((2, 32), 0.125, dtype=torch.float32)),
+        ("constant_positive_2x32", torch.full((2, 32), 0.125, dtype=torch.float32)),
+        ("constant_negative_2x32", torch.full((2, 32), -0.125, dtype=torch.float32)),
         ("large_range_4x64", torch.linspace(-32.0, 31.5, 256, dtype=torch.float32).reshape(4, 64)),
     ]
+
     ties = torch.zeros((1, 32), dtype=torch.float32)
     ties[0, :8] = torch.tensor([-1.0, -0.5, 0.0, 0.5, 1.0, 1.5, 2.0, -1.5])
-    cases.append(("round_ties_1x32", ties))
+    cases.append(("trunc_ties_1x32", ties))
+
+    abs_tie = torch.zeros((1, 32), dtype=torch.float32)
+    abs_tie[0, 0] = -2.0
+    abs_tie[0, 1] = 2.0
+    abs_tie[0, 2:8] = torch.tensor([-1.75, -1.0, -0.25, 0.0, 0.75, 1.5])
+    cases.append(("signed_absmax_first_tie_1x32", abs_tie))
     return cases
 
 
@@ -64,7 +72,7 @@ def main() -> int:
         default=None,
         help="Path to prism-llama-cpp/llama.cpp. Defaults to PRISM_LLAMA_CPP or LLAMA_CPP.",
     )
-    parser.add_argument("--seed", type=int, default=17)
+    parser.add_argument("--seed", type=int, default=19)
     args = parser.parse_args()
 
     prism_llama_cpp = args.prism_llama_cpp.expanduser().resolve() if args.prism_llama_cpp else _default_prism_llama_cpp()
@@ -79,10 +87,10 @@ def main() -> int:
 
     for name, tensor in _case_tensors(args.seed):
         gguf_dequant = dequantize(
-            quantize(tensor.numpy(), GGMLQuantizationType.Q8_0),
-            GGMLQuantizationType.Q8_0,
+            quantize(tensor.numpy(), GGMLQuantizationType.Q4_0),
+            GGMLQuantizationType.Q4_0,
         )
-        fake = fake_quant_q8_0(tensor, use_ste=False).numpy()
+        fake = fake_quant_q4_0(tensor, use_ste=False).numpy()
         delta = np.abs(gguf_dequant - fake)
         case_max_error = float(delta.max()) if delta.size else 0.0
         case_mismatches = int(np.count_nonzero(delta))
@@ -92,7 +100,7 @@ def main() -> int:
 
     print(f"summary: max_error={max_error:.8g} mismatches={total_mismatches}")
     if total_mismatches != 0 or max_error != 0.0:
-        raise AssertionError("Q8_0 fake quantization is not bit-exact with gguf-py Q8_0 dequantization")
+        raise AssertionError("Q4_0 fake quantization is not bit-exact with gguf-py Q4_0 dequantization")
     return 0
 
 

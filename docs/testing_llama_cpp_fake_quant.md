@@ -1,23 +1,23 @@
-# Kế hoạch kiểm thử llama.cpp fake quant
+# llama.cpp fake quant testing plan
 
-Mục tiêu của kế hoạch này là đảm bảo các fake quantizer trong `onebitllms` không chỉ chạy được, mà còn bám đúng công thức của `prism-llama-cpp` đủ để dùng trong QAT trước khi PTQ/export bằng llama.cpp.
+The goal of this plan is to ensure that `onebitllms` fake quantizers are not only executable, but also close enough to the `prism-llama-cpp` formulas to be used for QAT before PTQ/export with llama.cpp.
 
-## Phạm vi
+## Scope
 
-Các thành phần được kiểm thử:
+The tested components are:
 
-- Kernel fake quant: `Q1_0`, `Q2_0`, `Q4_0`, `Q4_1`, `Q8_0`, `Q8_1`.
-- Activation fake quant: `activation_quant="Q8_0"`.
+- Fake quant kernels: `Q1_0`, `Q2_0`, `Q4_0`, `Q4_1`, `Q8_0`, and `Q8_1`.
+- Activation fake quantization: `activation_quant="Q8_0"`.
 - Wrapper layer: `LlamaCppFakeQuantLinear`.
-- Model surgery: patch `nn.Linear` sang fake quant wrapper và unpatch về `nn.Linear`.
-- Alignment với `prism-llama-cpp/gguf-py`, ưu tiên `Q8_0` vì đây là target export 8-bit thật của `llama-quantize`.
-- Triton fast path cho `Q8_0` trên CUDA.
+- Model surgery: patching `nn.Linear` to the fake quant wrapper and unpatching back to `nn.Linear`.
+- Alignment with `prism-llama-cpp/gguf-py`, with priority on `Q4_0` and `Q8_0` because they are direct `llama-quantize` export targets.
+- Triton fast path for `Q8_0` on CUDA.
 
 ## Test pyramid
 
 ### L0: Static checks
 
-Chạy:
+Run:
 
 ```bash
 PYTHONPATH=src python -m py_compile \
@@ -26,25 +26,27 @@ PYTHONPATH=src python -m py_compile \
   src/onebitllms/layers/llama_cpp.py \
   src/onebitllms/utils/monkey_patching.py \
   tests/test_llama_cpp_fake_quant.py \
+  scripts/check_llama_cpp_q4_0_alignment.py \
+  scripts/check_llama_cpp_q8_0_alignment.py \
   scripts/check_llama_cpp_q8_0_triton.py
 
 git diff --check
 ```
 
-Điều kiện pass:
+Passing criteria:
 
-- Không có syntax error.
-- Không có trailing whitespace hoặc lỗi patch format.
+- No syntax errors.
+- No trailing whitespace or patch format errors.
 
-### L1: Unit tests công thức và layer
+### L1: Formula and layer unit tests
 
-Nếu env có `pytest`:
+If the environment has `pytest`:
 
 ```bash
 PYTHONPATH=src python -m pytest tests/test_llama_cpp_fake_quant.py -q
 ```
 
-Nếu env chưa có `pytest`, chạy trực tiếp:
+If `pytest` is not installed, run the test functions directly:
 
 ```bash
 PYTHONPATH=src python - <<'PY'
@@ -56,135 +58,132 @@ for name in sorted(n for n in dir(t) if n.startswith("test_")):
 PY
 ```
 
-Điều kiện pass:
+Passing criteria:
 
-- Reference PyTorch và kernel thật khớp bằng `torch.equal`.
-- Case tie rounding khớp C/C++ `roundf`.
-- Forward/backward của `LlamaCppFakeQuantLinear` chạy được.
-- STE gradient không bị đứt.
-- Patch/unpatch không đổi `state_dict` keys/values.
+- PyTorch references and real kernels match with `torch.equal`.
+- Tie and rounding cases match the C/C++ behavior.
+- `LlamaCppFakeQuantLinear` forward and backward run correctly.
+- STE gradients remain connected.
+- Patch/unpatch preserves `state_dict` keys and values.
 
-### L2: Alignment Q8_0 với gguf-py
+### L2: Q4_0/Q8_0 alignment with gguf-py
 
-Chạy script:
+Run:
 
 ```bash
+PYTHONPATH=src python scripts/check_llama_cpp_q4_0_alignment.py \
+  --prism-llama-cpp /path/to/prism-llama-cpp
+
 PYTHONPATH=src python scripts/check_llama_cpp_q8_0_alignment.py \
   --prism-llama-cpp /path/to/prism-llama-cpp
 ```
 
-Trong workspace hiện tại:
-
-```bash
-PYTHONPATH=src /opt/anaconda3/envs/llm/bin/python \
-  scripts/check_llama_cpp_q8_0_alignment.py \
-  --prism-llama-cpp /Users/admin/TuanDung/research-workspace/prism-llama-cpp
-```
-
-Điều kiện pass:
+Passing criteria:
 
 ```text
 summary: max_error=0 mismatches=0
 ```
 
-Nếu `max_error > 0` hoặc `mismatches > 0`, không được xem implementation `Q8_0` là tương thích.
+If `max_error > 0` or `mismatches > 0`, the corresponding implementation should not be considered llama.cpp-compatible.
 
 ### L3a: Q8_0 Triton fast path
 
-Trên máy có CUDA/Triton, chạy:
+On a CUDA/Triton machine, run:
 
 ```bash
 PYTHONPATH=src python scripts/check_llama_cpp_q8_0_triton.py --benchmark
 ```
 
-Trong môi trường CPU-only, chỉ dùng lệnh sau để xác nhận script không phá workflow:
+In a CPU-only environment, use:
 
 ```bash
 PYTHONPATH=src python scripts/check_llama_cpp_q8_0_triton.py --allow-missing-cuda
 ```
 
-Điều kiện pass trên GPU:
+Passing criteria on GPU:
 
 ```text
 summary: max_error=0 mismatches=0
 ```
 
-Nếu `max_error > 0` hoặc `mismatches > 0`, không được bật `backend="triton"` cho training thật. Khi chưa có GPU validation, chỉ nên dùng `backend="torch"` hoặc `backend="auto"` với fallback PyTorch.
+If `max_error > 0` or `mismatches > 0`, do not enable `backend="triton"` for real training. Without GPU validation, use `backend="torch"` or `backend="auto"` with PyTorch fallback.
 
-### L3b: Smoke test QAT layer
+### L3b: QAT layer smoke test
 
-Mục tiêu là đảm bảo wrapper dùng được trong train loop nhỏ.
+This level verifies that the wrapper can run in a small training loop.
 
 Checklist:
 
-1. Tạo model toy có vài `nn.Linear`.
-2. Patch với `quant_type="Q8_0"`.
-3. Chạy vài bước optimizer.
-4. Kiểm tra loss finite, gradient finite.
-5. Unpatch về `nn.Linear`.
-6. Kiểm tra `state_dict` keys không đổi.
+1. Create a toy model with a few `nn.Linear` layers.
+2. Patch the target configuration, at minimum `quant_type="Q4_0"` and `quant_type="Q8_0"`.
+3. Run a few optimizer steps.
+4. Check that the loss and gradients are finite.
+5. Unpatch back to `nn.Linear`.
+6. Check that `state_dict` keys are unchanged.
 
-Các test này đã nằm trong `tests/test_llama_cpp_fake_quant.py`. Khi mở rộng sang model thật, cần thêm smoke test với một model nhỏ từ Hugging Face.
+These tests are included in `tests/test_llama_cpp_fake_quant.py`. For a real model rollout, add a smoke test with a small Hugging Face model.
 
 ### L4: End-to-end GGUF export
 
-Đây là test bắt buộc trước khi tuyên bố một checkpoint QAT dùng được với llama.cpp.
+This test is required before claiming that a QAT checkpoint is usable with llama.cpp.
 
-Quy trình:
+Workflow:
 
 ```text
-1. Load model HF nhỏ hoặc checkpoint QAT.
-2. Patch selected linear layers với quant_type="Q8_0".
-3. Chạy train/smoke fine-tune ngắn.
-4. Unpatch về nn.Linear.
-5. Save HF checkpoint.
-6. Convert HF checkpoint sang F16/BF16 GGUF bằng script llama.cpp.
-7. Chạy llama-quantize input.gguf output-q8_0.gguf Q8_0.
-8. Chạy llama-cli với prompt cố định.
+1. Load a small HF model or QAT checkpoint.
+2. Patch selected linear layers with the target under test, for example quant_type="Q4_0".
+3. Run a short train/smoke fine-tune.
+4. Unpatch back to nn.Linear.
+5. Save the HF checkpoint.
+6. Convert the HF checkpoint to F16/BF16 GGUF with llama.cpp.
+7. Run llama-quantize input.gguf output-q4_0.gguf Q4_0.
+8. Run llama-cli with a fixed prompt.
 ```
 
-Điều kiện pass:
+Passing criteria:
 
-- Converter không lỗi.
-- `llama-quantize ... Q8_0` không lỗi.
-- `llama-cli` load được model Q8_0.
-- Prompt cố định sinh token không rỗng và không có NaN/inf/logit crash.
+- The converter succeeds.
+- `llama-quantize ... Q4_0` succeeds.
+- `llama-cli` loads the Q4_0 model.
+- The fixed prompt generates non-empty output without NaN, inf, or logit crashes.
 
 ### L5: Quality regression
 
-Lớp này không chứng minh công thức đúng, nhưng cần để biết QAT có đáng dùng không.
+This level does not prove formula correctness, but it is needed to decide whether QAT improves the target model.
 
-Khuyến nghị:
+Recommended comparisons:
 
-- Dùng một tập eval nhỏ cố định, ví dụ perplexity trên một subset WikiText/C4 hoặc benchmark nội bộ.
-- So sánh các cấu hình:
-  - FP16/BF16 baseline.
-  - PTQ Q8_0 không QAT.
-  - QAT fake `Q8_0` rồi PTQ `Q8_0`.
-  - QAT fake `Q8_0` + activation fake `Q8_0` rồi PTQ `Q8_0`.
-- Ghi lại exact commit của `onebitllms`, commit của `prism-llama-cpp`, model checkpoint, seed và command.
+- FP16/BF16 baseline.
+- PTQ `Q4_0` without QAT.
+- QAT fake `Q4_0`, then PTQ `Q4_0`.
+- QAT fake `Q4_0` plus activation fake `Q8_0`, then PTQ `Q4_0`.
+- PTQ `Q8_0` without QAT.
+- QAT fake `Q8_0`, then PTQ `Q8_0`.
+- QAT fake `Q8_0` plus activation fake `Q8_0`, then PTQ `Q8_0`.
 
-Điều kiện pass phụ thuộc mục tiêu chất lượng, nhưng tối thiểu QAT không được làm model tệ hơn PTQ-only trên eval nhỏ mà không có lý do rõ ràng.
+Record the exact `onebitllms` commit, `prism-llama-cpp` commit, model checkpoint, seed, and command.
 
-## Ma trận kiểm thử Q8_0
+The passing threshold depends on the quality target, but QAT should at least avoid becoming worse than PTQ-only on a small fixed eval set without a clear explanation.
 
-| Nhóm case | Mục đích |
+## Q4_0/Q8_0 test matrix
+
+| Case group | Purpose |
 | --- | --- |
-| Random tensors | Bắt lỗi công thức chung |
-| All zeros | Bắt lỗi chia 0 |
-| Constant tensors | Bắt lỗi scale nhỏ/đều |
-| Large range | Bắt lỗi saturation và signed int8 range |
-| Half ties | Bắt lỗi rounding khác `roundf` |
-| Multi-block rows | Bắt lỗi reshape/block boundary |
-| Layer forward/backward | Bắt lỗi integration trong `nn.Module` |
-| Patch/unpatch | Bắt lỗi export lifecycle |
-| gguf-py exact alignment | Bắt lỗi lệch với llama.cpp reference implementation |
-| Triton exact alignment | Bắt lỗi lệch giữa CUDA fast path và PyTorch reference |
+| Random tensors | Catch general formula mismatches |
+| All zeros | Catch divide-by-zero behavior |
+| Constant tensors | Catch small/even scale issues |
+| Large range | Catch saturation and signed int8 range issues |
+| Half ties | Catch rounding differences |
+| Multi-block rows | Catch reshape/block boundary issues |
+| Layer forward/backward | Catch `nn.Module` integration issues |
+| Patch/unpatch | Catch export lifecycle issues |
+| gguf-py exact alignment | Catch differences from llama.cpp reference implementation |
+| Triton exact alignment | Catch CUDA fast path differences from the PyTorch reference |
 
-## Những điều không được tuyên bố quá mức
+## Claims to avoid
 
-- Pass công thức `Q8_0` không đồng nghĩa mọi checkpoint QAT sẽ tốt hơn PTQ-only.
-- Activation fake quant `Q8_0` không có nghĩa activation được lưu trong GGUF.
-- `Q8_1` không phải target `llama-quantize` thông thường trong fork hiện tại.
-- `Q8_K` chưa được expose trong `onebitllms` vì chưa phải target export chính của fork này.
-- Triton fast path hiện mới có cho `Q8_0`; `Q4_0/Q4_1` vẫn phải đi qua PyTorch reference.
+- Passing `Q4_0`/`Q8_0` formula tests does not mean every QAT checkpoint will beat PTQ-only.
+- Activation fake quantization with `Q8_0` does not mean activations are stored in GGUF.
+- `Q8_1` is not a standard `llama-quantize` target in the current fork.
+- `Q8_K` is not exposed in `onebitllms` because it is not the main export target in this fork.
+- The Triton fast path currently exists for `Q8_0`; `Q4_0` and `Q4_1` still use the PyTorch reference path.

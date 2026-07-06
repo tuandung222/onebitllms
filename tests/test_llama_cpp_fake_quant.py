@@ -265,6 +265,38 @@ def test_llama_cpp_fake_quant_linear_supports_q4_types():
         assert layer.quant_type == quant_type
 
 
+def test_q4_0_qat_smoke_updates_weights_and_unpatches_cleanly():
+    torch.manual_seed(15)
+    model = ToyExportModel()
+    before_keys = tuple(model.state_dict().keys())
+
+    replace_linear_with_llama_cpp_fake_quant_linear(model, quant_type="Q4_0")
+    assert isinstance(model.proj, LlamaCppFakeQuantLinear)
+    assert isinstance(model.block[0], LlamaCppFakeQuantLinear)
+    assert isinstance(model.lm_head, nn.Linear)
+
+    optimizer = torch.optim.SGD(model.parameters(), lr=1e-2)
+    x = torch.randn(4, 96, dtype=torch.float32)
+    target = torch.randn(4, 16, dtype=torch.float32)
+    before_weight = model.proj.weight.detach().clone()
+
+    for _ in range(3):
+        optimizer.zero_grad(set_to_none=True)
+        loss = (model(x) - target).square().mean()
+        loss.backward()
+        assert torch.isfinite(loss)
+        assert model.proj.weight.grad is not None
+        assert torch.isfinite(model.proj.weight.grad).all()
+        optimizer.step()
+
+    assert not torch.equal(before_weight, model.proj.weight.detach())
+
+    replace_llama_cpp_fake_quant_linear_with_linear(model)
+    assert isinstance(model.proj, nn.Linear)
+    assert isinstance(model.block[0], nn.Linear)
+    assert tuple(model.state_dict().keys()) == before_keys
+
+
 def test_llama_cpp_fake_quant_linear_supports_q8_weight_types():
     torch.manual_seed(12)
 

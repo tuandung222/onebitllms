@@ -2,41 +2,41 @@
   <img src="assets/onebitllms-logo.png" alt="onebitllms logo" width="400">
 </p>
 
-# onebitllms fork: BitNet fine-tuning và llama.cpp-compatible QAT
+# onebitllms fork: BitNet fine-tuning and llama.cpp-compatible QAT
 
-Fork này mở rộng `onebitllms` theo hai hướng:
+This fork extends `onebitllms` in two directions:
 
-1. Giữ lại đường fine-tuning BitNet / 1.58-bit từ upstream.
-2. Thêm các fake quantizer tương thích công thức `llama.cpp` / `prism-llama-cpp` để nghiên cứu QAT trước khi export sang GGUF và PTQ bằng `llama-quantize`.
+1. It keeps the upstream BitNet / 1.58-bit fine-tuning path.
+2. It adds fake quantizers that mirror `llama.cpp` / `prism-llama-cpp` quantization formulas for QAT research before GGUF export and PTQ with `llama-quantize`.
 
-Mục tiêu thực tế của fork là phục vụ nghiên cứu quy trình:
+The intended workflow is:
 
 ```text
-QAT trong PyTorch
--> lưu Hugging Face checkpoint chuẩn
--> convert sang GGUF F16/BF16
--> PTQ bằng llama.cpp / prism-llama-cpp
--> inference trên desktop
+QAT in PyTorch
+-> save a standard Hugging Face checkpoint
+-> convert to F16/BF16 GGUF
+-> PTQ with llama.cpp / prism-llama-cpp
+-> inference on llama.cpp-compatible runtimes
 ```
 
-Các layer fake quant trong fork này không phải inference kernel và không pack GGUF. Chúng giữ weight trainable ở floating-point, inject nhiễu quantize-dequantize trong forward pass, và dùng straight-through estimator cho backward.
+The fake-quant layers in this fork are not inference kernels and do not pack GGUF bytes. They keep trainable weights in floating point, inject quantize-dequantize noise in the forward pass, and use a straight-through estimator for backward.
 
-## Tính năng chính
+## Features
 
-| Nhóm | Trạng thái | Ghi chú |
+| Area | Status | Notes |
 | --- | --- | --- |
-| BitNet / 1.58-bit fine-tuning | Có | Kế thừa upstream `onebitllms`, dùng `BitNetLinear` và Triton kernels |
-| Triton quant kernels | Có | Phục vụ đường BitNet training, không phải GGUF packing |
-| llama.cpp fake quant weight | Có | `Q1_0`, `Q2_0`, `Q4_0`, `Q4_1`, `Q8_0`, `Q8_1` |
-| llama.cpp fake quant activation | Có | `activation_quant="Q8_0"` như nhiễu tạm thời trong QAT |
-| Triton fast path cho llama.cpp QAT | Experimental | Hiện có `Q8_0` CUDA fast path, default vẫn là PyTorch |
-| Patch/unpatch `nn.Linear` | Có | Dùng để train bằng wrapper rồi export checkpoint chuẩn |
-| GGUF export trực tiếp | Không | Dùng converter và `llama-quantize` của llama.cpp |
-| Inference kernel | Không | Inference chạy bằng llama.cpp / prism-llama-cpp / bitnet.cpp |
+| BitNet / 1.58-bit fine-tuning | Supported | Inherited from upstream `onebitllms`, using `BitNetLinear` and Triton kernels |
+| Triton quant kernels | Supported | Used by the BitNet training path, not GGUF packing |
+| llama.cpp fake-quant weights | Supported | `Q1_0`, `Q2_0`, `Q4_0`, `Q4_1`, `Q8_0`, `Q8_1` |
+| llama.cpp fake-quant activations | Supported | `activation_quant="Q8_0"` as temporary QAT noise |
+| Triton fast path for llama.cpp QAT | Experimental | Currently available for `Q8_0` CUDA only; the default backend is PyTorch |
+| Patch/unpatch `nn.Linear` | Supported | Train with wrappers, then export a standard checkpoint |
+| Direct GGUF export | Not supported | Use llama.cpp converters and `llama-quantize` |
+| Inference kernel | Not supported | Run inference with llama.cpp / prism-llama-cpp / bitnet.cpp |
 
-## Cài đặt
+## Installation
 
-Fork này nên được cài từ source:
+Install this fork from source:
 
 ```bash
 git clone https://github.com/tuandung222/onebitllms.git
@@ -44,23 +44,23 @@ cd onebitllms
 pip install -e .
 ```
 
-Nếu muốn chạy test:
+To run tests:
 
 ```bash
 pip install -e ".[test]"
 ```
 
-Yêu cầu chính:
+Main requirements:
 
 - Python >= 3.9.
 - PyTorch.
 - `transformers`, `accelerate`, `safetensors`, `huggingface_hub`.
-- GPU NVIDIA + Triton nếu dùng đường BitNet CUDA kernels.
-- Local `prism-llama-cpp` hoặc `llama.cpp` nếu muốn kiểm thử alignment, convert GGUF, quantize và inference.
+- NVIDIA GPU + Triton if you use the BitNet CUDA kernels.
+- A local `prism-llama-cpp` or `llama.cpp` checkout if you want to run alignment tests, convert GGUF files, quantize, or run inference.
 
-## Quick start: llama.cpp-compatible QAT
+## Quick Start: llama.cpp-Compatible QAT
 
-### 1. Fake quant trực tiếp một tensor
+### 1. Fake-quantize a tensor directly
 
 ```python
 import torch
@@ -73,7 +73,7 @@ w_q4_1 = fake_quant_q4_1(weight)
 w_q8_0 = fake_quant_q8_0(weight)
 ```
 
-### 2. Thay `nn.Linear` bằng fake quant wrapper
+### 2. Replace `nn.Linear` with fake-quant wrappers
 
 ```python
 from transformers import AutoModelForCausalLM
@@ -87,25 +87,29 @@ model = AutoModelForCausalLM.from_pretrained(
 
 model = replace_linear_with_llama_cpp_fake_quant_linear(
     model,
-    quant_type="Q4_1",
+    quant_type="Q4_0",
 )
 ```
 
-Wrapper sẽ thay các `nn.Linear` tương thích block size. Mặc định helper bỏ qua `lm_head`.
+The helper replaces block-size-compatible `nn.Linear` modules. It skips `lm_head` by default.
 
-### 3. Bật fake quant activation Q8_0 nếu cần
+For QAT targeting `llama-quantize ... Q4_0`, use `quant_type="Q4_0"` and create the optimizer after patching the model.
+
+### 3. Optionally add Q8_0 activation fake quantization
 
 ```python
 model = replace_linear_with_llama_cpp_fake_quant_linear(
     model,
-    quant_type="Q8_0",
+    quant_type="Q4_0",
     activation_quant="Q8_0",
 )
 ```
 
-Lưu ý: activation fake quant chỉ inject nhiễu trong training. GGUF không lưu activation ở dạng quantized.
+`activation_quant="Q8_0"` only injects temporary training noise. GGUF does not store activations in quantized form.
 
-### 4. Unpatch trước khi lưu checkpoint
+In llama.cpp CPU type traits, `Q4_0` dot products use `vec_dot_type = GGML_TYPE_Q8_0`, so activation fake quantization can be useful for ablations. It should not be enabled blindly; measure it against your target model and backend.
+
+### 4. Unpatch before saving a checkpoint
 
 ```python
 from onebitllms import replace_llama_cpp_fake_quant_linear_with_linear
@@ -114,11 +118,11 @@ model = replace_llama_cpp_fake_quant_linear_with_linear(model)
 model.save_pretrained("output-hf-checkpoint")
 ```
 
-Không nên lưu checkpoint HF khi model vẫn còn `LlamaCppFakeQuantLinear`, vì converter của llama.cpp kỳ vọng cấu trúc module/weight chuẩn.
+Do not save a Hugging Face checkpoint while the model still contains `LlamaCppFakeQuantLinear`; llama.cpp converters expect standard module and weight layouts.
 
-### 5. Dùng Triton fast path cho Q8_0
+### 5. Use the Q8_0 Triton fast path
 
-Default backend là `torch` để giữ tính portable và deterministic. Nếu train trên CUDA và đã cài Triton, có thể bật fast path cho `Q8_0`:
+The default backend is `torch` for portability and deterministic behavior. On CUDA with Triton installed, you can use the experimental `Q8_0` fast path:
 
 ```python
 model = replace_linear_with_llama_cpp_fake_quant_linear(
@@ -129,137 +133,153 @@ model = replace_linear_with_llama_cpp_fake_quant_linear(
 )
 ```
 
-Các backend:
+Backends:
 
-- `backend="torch"`: luôn dùng PyTorch reference.
-- `backend="auto"`: dùng Triton cho CUDA `Q8_0` nếu có thể, fallback về PyTorch khi không hỗ trợ.
-- `backend="triton"`: bắt buộc dùng Triton, hiện chỉ hỗ trợ `Q8_0`.
+- `backend="torch"`: always use the PyTorch reference implementation.
+- `backend="auto"`: use Triton for supported CUDA `Q8_0` tensors and fall back to PyTorch when unsupported.
+- `backend="triton"`: require Triton; currently supports `Q8_0` only.
 
-Trước khi dùng `backend="triton"` cho training thật, hãy chạy script validation trên máy GPU:
+Before using `backend="triton"` in real training, validate it on the target GPU:
 
 ```bash
 PYTHONPATH=src python scripts/check_llama_cpp_q8_0_triton.py --benchmark
 ```
 
-## Các kiểu llama.cpp fake quant đang hỗ trợ
+## Supported llama.cpp Fake-Quant Types
 
-| Type | Block size | Công thức | Có nên dùng làm target export? |
+| Type | Block size | Formula | Export target? |
 | --- | ---: | --- | --- |
-| `Q1_0` | 128 | `prism-llama-cpp` `quantize_row_q1_0_ref` | Chỉ dùng nếu fork/export path hỗ trợ |
-| `Q2_0` | 128 | `prism-llama-cpp` `quantize_row_q2_0_ref` | Chỉ dùng nếu fork/export path hỗ trợ |
-| `Q4_0` | 32 | llama.cpp `quantize_row_q4_0_ref` | Có, nếu sẽ PTQ bằng `llama-quantize Q4_0` |
-| `Q4_1` | 32 | llama.cpp `quantize_row_q4_1_ref` | Có, nếu sẽ PTQ bằng `llama-quantize Q4_1` |
-| `Q8_0` | 32 | llama.cpp `quantize_row_q8_0_ref` / `dequantize_row_q8_0` | Có, đây là target 8-bit chính |
-| `Q8_1` | 32 | ggml `quantize_row_q8_1_ref` | Không nên xem là target export thông thường |
+| `Q1_0` | 128 | `prism-llama-cpp` `quantize_row_q1_0_ref` | Use only if your fork/export path supports it |
+| `Q2_0` | 128 | `prism-llama-cpp` `quantize_row_q2_0_ref` | Use only if your fork/export path supports it |
+| `Q4_0` | 32 | llama.cpp `quantize_row_q4_0_ref` | Yes, if you will PTQ with `llama-quantize Q4_0` |
+| `Q4_1` | 32 | llama.cpp `quantize_row_q4_1_ref` | Yes, if you will PTQ with `llama-quantize Q4_1` |
+| `Q8_0` | 32 | llama.cpp `quantize_row_q8_0_ref` / `dequantize_row_q8_0` | Yes, the primary 8-bit target |
+| `Q8_1` | 32 | ggml `quantize_row_q8_1_ref` | Not recommended as a normal export target |
 
-`Q8_0` là lựa chọn 8-bit nên ưu tiên. Trong `prism-llama-cpp`, `Q8_0` xuất hiện trực tiếp trong `tools/quantize/quantize.cpp` như một mode quantize model. `Q8_1` có trong `ggml`, nhưng chủ yếu là format runtime/vector-dot và không phải lựa chọn `llama-quantize` thông thường. `Q8_K` cũng là format nội bộ/K-quant nên chưa được expose như QAT target trong fork này.
+`Q8_0` is the recommended 8-bit target. In `prism-llama-cpp`, `Q8_0` is exposed directly in `tools/quantize/quantize.cpp` as a model quantization mode. `Q8_1` exists in `ggml`, but it is mainly a runtime/vector-dot format, not a normal `llama-quantize` export mode. `Q8_K` is also an internal/K-quant format and is not exposed as a QAT target in this fork.
 
-## Quy trình QAT -> GGUF -> inference
+## QAT -> GGUF -> Inference Workflow
 
-Luồng khuyến nghị:
+Recommended flow:
 
 ```text
-1. Load model HF.
-2. Patch selected Linear layers bằng LlamaCppFakeQuantLinear.
-3. Fine-tune/QAT trong PyTorch.
-4. Unpatch về nn.Linear.
-5. Save HF checkpoint.
-6. Convert checkpoint sang GGUF F16/BF16 bằng llama.cpp.
-7. Chạy llama-quantize với target khớp fake quant, ví dụ Q8_0.
-8. Chạy llama-cli để smoke test inference.
-9. Chạy eval cố định để so QAT+PTQ với PTQ-only.
+1. Load a Hugging Face model.
+2. Patch selected Linear layers with LlamaCppFakeQuantLinear.
+3. Fine-tune / run QAT in PyTorch.
+4. Unpatch back to nn.Linear.
+5. Save a Hugging Face checkpoint.
+6. Convert the checkpoint to F16/BF16 GGUF with llama.cpp.
+7. Run llama-quantize with the target that matches the fake quantizer, for example Q4_0.
+8. Run llama-cli for an inference smoke test.
+9. Run a fixed evaluation to compare QAT+PTQ against PTQ-only.
 ```
 
-Ví dụ phần PTQ sau khi đã có GGUF F16/BF16:
+Example PTQ command after you have an F16/BF16 GGUF:
 
 ```bash
 /path/to/prism-llama-cpp/build/bin/llama-quantize \
   model-f16.gguf \
-  model-q8_0.gguf \
-  Q8_0
+  model-q4_0.gguf \
+  Q4_0
 ```
 
-Smoke test inference:
+Inference smoke test:
 
 ```bash
 /path/to/prism-llama-cpp/build/bin/llama-cli \
-  -m model-q8_0.gguf \
+  -m model-q4_0.gguf \
   -p "Explain quantization-aware training in one paragraph." \
   -n 64
 ```
 
-## Kiểm thử và validation
+## Testing and Validation
 
-Fork này có hai lớp test chính cho phần llama.cpp fake quant.
+This fork has two main test layers for llama.cpp-compatible fake quantization.
 
 ### Unit tests
 
-Nếu có `pytest`:
+If `pytest` is available:
 
 ```bash
 PYTHONPATH=src python -m pytest tests/test_llama_cpp_fake_quant.py -q
 ```
 
-Nếu môi trường chưa có `pytest`:
+If your environment does not have `pytest`:
 
 ```bash
 PYTHONPATH=src python - <<'PY'
-import tests.test_llama_cpp_fake_quant as t
+import importlib.util
+from pathlib import Path
 
-for name in sorted(n for n in dir(t) if n.startswith("test_")):
-    getattr(t, name)()
+path = Path("tests/test_llama_cpp_fake_quant.py")
+spec = importlib.util.spec_from_file_location("test_llama_cpp_fake_quant", path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+for name in sorted(n for n in dir(mod) if n.startswith("test_")):
+    getattr(mod, name)()
     print(f"{name}: ok")
 PY
 ```
 
-Các test này kiểm tra:
+These tests check:
 
-- Công thức tensor khớp reference PyTorch.
-- Rounding half-tie khớp C/C++ `roundf`.
-- Forward/backward của `LlamaCppFakeQuantLinear`.
-- STE gradient không bị đứt.
-- Patch/unpatch giữ nguyên `state_dict` keys và values.
+- Tensor formulas against local PyTorch references.
+- Half-tie rounding against C/C++ `roundf` where applicable.
+- `LlamaCppFakeQuantLinear` forward/backward.
+- STE gradient flow.
+- Patch/unpatch preserving `state_dict` keys and values.
 
-### Q8_0 alignment với gguf-py
+### Q4_0/Q8_0 alignment with gguf-py
 
-Script alignment đối chiếu `fake_quant_q8_0` với implementation `Q8_0` trong `prism-llama-cpp/gguf-py`:
+The alignment scripts compare fake quantizers against `prism-llama-cpp/gguf-py`:
 
 ```bash
+PYTHONPATH=src python scripts/check_llama_cpp_q4_0_alignment.py \
+  --prism-llama-cpp /path/to/prism-llama-cpp
+
 PYTHONPATH=src python scripts/check_llama_cpp_q8_0_alignment.py \
   --prism-llama-cpp /path/to/prism-llama-cpp
 ```
 
-Điều kiện pass:
+You can also set an environment variable:
+
+```bash
+PRISM_LLAMA_CPP=/path/to/prism-llama-cpp \
+PYTHONPATH=src python scripts/check_llama_cpp_q4_0_alignment.py
+```
+
+Passing condition:
 
 ```text
 summary: max_error=0 mismatches=0
 ```
 
-Nếu có bất kỳ mismatch nào, không được xem `Q8_0` fake quant là tương thích công thức.
+If there is any mismatch, do not treat the corresponding fake quantizer as formula-compatible.
 
 ### Q8_0 Triton validation
 
-Trên máy có CUDA/Triton:
+On CUDA with Triton:
 
 ```bash
 PYTHONPATH=src python scripts/check_llama_cpp_q8_0_triton.py --benchmark
 ```
 
-Trong môi trường CPU-only, có thể kiểm tra script không phá workflow bằng:
+On CPU-only environments, you can verify that the script does not break the workflow:
 
 ```bash
 PYTHONPATH=src python scripts/check_llama_cpp_q8_0_triton.py --allow-missing-cuda
 ```
 
-Điều kiện pass trên GPU vẫn là:
+Passing condition on GPU:
 
 ```text
 summary: max_error=0 mismatches=0
 ```
 
-## BitNet / 1.58-bit fine-tuning
+## BitNet / 1.58-Bit Fine-Tuning
 
-Đường BitNet gốc của upstream vẫn được giữ lại. Ví dụ fine-tune từ checkpoint pre-quantized:
+The upstream BitNet path is still available. Example fine-tuning from a pre-quantized checkpoint:
 
 ```python
 import torch
@@ -281,7 +301,7 @@ model = AutoModelForCausalLM.from_pretrained(
 model = replace_linear_with_bitnet_linear(model)
 ```
 
-Sau khi train xong, quantize checkpoint về 1-bit:
+After training, quantize the checkpoint back to 1-bit:
 
 ```python
 from onebitllms import quantize_to_1bit
@@ -292,7 +312,7 @@ quantize_to_1bit(
 )
 ```
 
-Có thể revert checkpoint BitNet về BF16:
+You can also revert a BitNet checkpoint back to BF16:
 
 ```python
 from onebitllms import convert_to_bf16
@@ -303,31 +323,31 @@ convert_to_bf16(
 )
 ```
 
-Inference BitNet nên chạy bằng [`bitnet.cpp`](https://github.com/microsoft/BitNet) hoặc integration phù hợp trong `transformers`.
+Run BitNet inference with [`bitnet.cpp`](https://github.com/microsoft/BitNet) or another compatible inference backend.
 
-## Triton kernels
+## Triton Kernels
 
-Fork này vẫn expose các Triton kernels từ upstream:
+This fork still exposes the upstream Triton kernels:
 
 ```python
 from onebitllms import activation_quant_triton, weight_quant_triton
 ```
 
-Ý nghĩa:
+Meaning:
 
 - `weight_quant_triton`: ternary BitNet weight fake quantization.
-- `activation_quant_triton`: row-wise int8 activation fake quantization cho đường BitNet.
+- `activation_quant_triton`: row-wise int8 activation fake quantization for the BitNet path.
 
-Các kernel này không phải GGUF packing kernels. Nếu sau này tối ưu QAT trên GPU cho các kiểu `llama.cpp`, hướng đúng là thêm kernel Triton sau khi công thức PyTorch/reference đã được chứng minh khớp `ggml`.
+These kernels are not GGUF packing kernels. If future work optimizes llama.cpp-compatible QAT on GPU, add Triton kernels only after the PyTorch/reference formulas are proven to match `ggml`.
 
-## Cấu trúc repo
+## Repository Layout
 
 ```text
 src/onebitllms/
   kernels/
-    llama_cpp_quant.py      # fake quantizers Q1/Q2/Q4/Q8 theo ggml
-    activation_quant.py     # Triton activation kernel cho BitNet
-    weight_quant.py         # Triton weight kernel cho BitNet
+    llama_cpp_quant.py      # fake quantizers Q1/Q2/Q4/Q8 following ggml formulas
+    activation_quant.py     # Triton activation kernel for BitNet
+    weight_quant.py         # Triton weight kernel for BitNet
   layers/
     llama_cpp.py            # LlamaCppFakeQuantLinear
     bitnet.py               # BitNetLinear
@@ -340,53 +360,56 @@ tests/
   test_kernels.py
 
 docs/
+  llama_cpp_q4_0_qat.md
   llama_cpp_q8_0_qat.md
   testing_llama_cpp_fake_quant.md
 
 scripts/
+  check_llama_cpp_q4_0_alignment.py
   check_llama_cpp_q8_0_alignment.py
   check_llama_cpp_q8_0_triton.py
 ```
 
-## Tài liệu chi tiết
+## Detailed Docs
 
-- [Q8_0 QAT tương thích llama.cpp](docs/llama_cpp_q8_0_qat.md)
-- [Kế hoạch kiểm thử llama.cpp fake quant](docs/testing_llama_cpp_fake_quant.md)
+- [Q4_0 QAT compatible with llama.cpp](docs/llama_cpp_q4_0_qat.md)
+- [Q8_0 QAT compatible with llama.cpp](docs/llama_cpp_q8_0_qat.md)
+- [llama.cpp fake-quant testing plan](docs/testing_llama_cpp_fake_quant.md)
 
-## Giới hạn cần nhớ
+## Limitations
 
-- Fake quant đúng công thức không đảm bảo checkpoint QAT sẽ tốt hơn PTQ-only. Cần eval chất lượng riêng.
-- `activation_quant="Q8_0"` không có nghĩa activation được lưu trong GGUF.
-- `Q8_1` và `Q8_K` không nên được quảng bá như target export GGUF thông thường trong fork hiện tại.
-- Triton fast path hiện mới có cho `Q8_0`; các kiểu `Q4_0/Q4_1` vẫn dùng PyTorch reference.
-- Trước khi export HF checkpoint sang GGUF, phải unpatch wrapper fake quant về `nn.Linear`.
-- Nếu target là một kiểu quantize khác của llama.cpp, fake quant trong QAT nên khớp đúng công thức của target đó.
+- Formula-correct fake quantization does not guarantee that a QAT checkpoint will outperform PTQ-only. Run quality evaluation.
+- `activation_quant="Q8_0"` does not mean activations are stored in GGUF.
+- `Q8_1` and `Q8_K` should not be promoted as normal GGUF export targets in this fork.
+- The Triton fast path currently supports only `Q8_0`; `Q4_0` and `Q4_1` use the PyTorch reference path.
+- Before exporting a Hugging Face checkpoint to GGUF, unpatch fake-quant wrappers back to `nn.Linear`.
+- If the target is a different llama.cpp quantization type, the QAT fake quantizer should match that exact target formula.
 
 ## FAQ
 
-### Fork này khác upstream `tiiuae/onebitllms` ở đâu?
+### How is this fork different from upstream `tiiuae/onebitllms`?
 
-Fork này giữ đường BitNet của upstream và thêm đường nghiên cứu QAT tương thích `llama.cpp` / `prism-llama-cpp`.
+This fork keeps the upstream BitNet path and adds a llama.cpp / prism-llama-cpp-compatible QAT research path.
 
-### Có thể dùng fork này để inference trực tiếp không?
+### Can this fork run inference directly?
 
-Không. Fork này phục vụ training/fine-tuning/fake quant. Inference nên chạy bằng `llama.cpp`, `prism-llama-cpp`, `bitnet.cpp`, hoặc backend inference phù hợp.
+No. This fork is for training, fine-tuning, and fake quantization. Run inference with `llama.cpp`, `prism-llama-cpp`, `bitnet.cpp`, or another compatible inference backend.
 
-### QAT xong có cần `llama-quantize` nữa không?
+### Do I still need `llama-quantize` after QAT?
 
-Có. Fake quant trong QAT chỉ giúp model thấy nhiễu quantization trong training. Sau khi lưu checkpoint HF, vẫn cần convert sang GGUF và chạy `llama-quantize` để tạo file quantized thật.
+Yes. Fake quantization during QAT only exposes the model to quantization noise during training. After saving the Hugging Face checkpoint, you still need to convert to GGUF and run `llama-quantize` to create the real quantized file.
 
-### Nên chọn `Q8_0` hay `Q8_1` cho QAT 8-bit?
+### Should I use `Q8_0` or `Q8_1` for 8-bit QAT?
 
-Nên chọn `Q8_0` nếu mục tiêu là desktop inference bằng GGUF, vì `Q8_0` là mode quantize model thật trong `llama-quantize`. `Q8_1` là format runtime/vector-dot trong `ggml`, không phải đường export thông thường.
+Use `Q8_0` if the goal is GGUF desktop inference, because `Q8_0` is a real model quantization mode in `llama-quantize`. `Q8_1` is a runtime/vector-dot format in `ggml`, not the normal export path.
 
-### LoRA có được hỗ trợ không?
+### Is LoRA supported?
 
-LoRA không phải mục tiêu chính của package hiện tại. Có thể nghiên cứu thêm, nhưng cần kiểm tra kỹ tương tác giữa LoRA adapter, patch/unpatch layer, và export checkpoint.
+LoRA is not the primary target of this package today. It can be researched, but you must carefully validate interactions between LoRA adapters, layer patch/unpatch, and checkpoint export.
 
 ## Citation
 
-Fork này dựa trên upstream `onebitllms` của Falcon-LLM Team. Nếu dùng cho nghiên cứu, hãy cite upstream và các công trình nền tảng về BitNet:
+This fork is based on upstream `onebitllms` from the Falcon-LLM Team. If you use it for research, cite upstream and the underlying BitNet work:
 
 ```bibtex
 @misc{tiionebitllms,
