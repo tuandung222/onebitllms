@@ -98,9 +98,8 @@ def _fake_quant_q2_0_no_grad(x: torch.Tensor) -> torch.Tensor:
     d = _fp16_round(amax)
     inv_d = torch.where(amax > 0.0, 1.0 / amax, torch.zeros_like(amax))
 
-    q = _round_away_from_zero(xb * inv_d) + 1.0
-    q = torch.clamp(q, 0.0, 3.0)
-    xq = (q - 1.0) * d
+    q = _round_away_from_zero(xb * inv_d).add_(1.0).clamp_(0.0, 3.0)
+    xq = q.sub_(1.0).mul_(d)
     return _restore_blocks(xq, orig_shape, x.dtype)
 
 
@@ -128,9 +127,8 @@ def _fake_quant_q4_0_no_grad(x: torch.Tensor) -> torch.Tensor:
     d = _fp16_round(d_raw)
     inv_d = torch.where(d_raw != 0, 1.0 / d_raw, torch.zeros_like(d_raw))
 
-    q = torch.trunc(xb * inv_d + 8.5)
-    q = torch.clamp(q, 0.0, 15.0)
-    xq = (q - 8.0) * d
+    q = (xb * inv_d).add_(8.5).trunc_().clamp_(0.0, 15.0)
+    xq = q.sub_(8.0).mul_(d)
     return _restore_blocks(xq, orig_shape, x.dtype)
 
 
@@ -158,9 +156,8 @@ def _fake_quant_q4_1_no_grad(x: torch.Tensor) -> torch.Tensor:
     m = _fp16_round(x_min)
     inv_d = torch.where(d_raw != 0, 1.0 / d_raw, torch.zeros_like(d_raw))
 
-    q = torch.trunc((xb - x_min) * inv_d + 0.5)
-    q = torch.clamp(q, 0.0, 15.0)
-    xq = q * d + m
+    q = (xb - x_min).mul_(inv_d).add_(0.5).trunc_().clamp_(0.0, 15.0)
+    xq = q.mul_(d).add_(m)
     return _restore_blocks(xq, orig_shape, x.dtype)
 
 
@@ -185,9 +182,8 @@ def _fake_quant_q8_0_like(x: torch.Tensor) -> torch.Tensor:
     d = _fp16_round(d_raw)
     inv_d = torch.where(d_raw != 0, 1.0 / d_raw, torch.zeros_like(d_raw))
 
-    q = _round_away_from_zero(xb * inv_d)
-    q = torch.clamp(q, -128.0, 127.0)
-    xq = q * d
+    q = _round_away_from_zero(xb * inv_d).clamp_(-128.0, 127.0)
+    xq = q.mul_(d)
     return _restore_blocks(xq, orig_shape, x.dtype)
 
 
