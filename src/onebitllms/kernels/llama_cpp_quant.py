@@ -43,6 +43,8 @@ class _STEQuantize(torch.autograd.Function):
 
 
 def _quantize_ste(x: torch.Tensor, x_quant: torch.Tensor) -> torch.Tensor:
+    if not torch.is_grad_enabled() or not x.requires_grad:
+        return x_quant
     return _STEQuantize.apply(x, x_quant)
 
 
@@ -67,6 +69,14 @@ def _restore_blocks(x_blocks: torch.Tensor, orig_shape: torch.Size, dtype: torch
     return x_blocks.reshape(orig_shape).to(dtype)
 
 
+@torch.no_grad()
+def _fake_quant_q1_0_no_grad(x: torch.Tensor) -> torch.Tensor:
+    xb, orig_shape = _as_float_blocks(x, Q1_BLOCK_SIZE)
+    d = _fp16_round(xb.abs().mean(dim=-1, keepdim=True))
+    xq = torch.where(xb >= 0.0, d, -d)
+    return _restore_blocks(xq, orig_shape, x.dtype)
+
+
 def fake_quant_q1_0(x: torch.Tensor, *, use_ste: bool = True) -> torch.Tensor:
     """Fake quantize with the prism-llama-cpp Q1_0 quantize-dequantize rule.
 
@@ -77,12 +87,21 @@ def fake_quant_q1_0(x: torch.Tensor, *, use_ste: bool = True) -> torch.Tensor:
     - store one sign bit per value, where ``x >= 0`` maps to ``+d``;
     - dequantize to ``+d`` or ``-d``.
     """
-    xb, orig_shape = _as_float_blocks(x, Q1_BLOCK_SIZE)
-    d = _fp16_round(xb.abs().mean(dim=-1, keepdim=True))
-    sign = torch.where(xb >= 0.0, torch.ones_like(xb), -torch.ones_like(xb))
-    xq = d * sign
-    xq = _restore_blocks(xq, orig_shape, x.dtype)
+    xq = _fake_quant_q1_0_no_grad(x)
     return _quantize_ste(x, xq) if use_ste else xq
+
+
+@torch.no_grad()
+def _fake_quant_q2_0_no_grad(x: torch.Tensor) -> torch.Tensor:
+    xb, orig_shape = _as_float_blocks(x, Q2_BLOCK_SIZE)
+    amax = xb.abs().max(dim=-1, keepdim=True).values
+    d = _fp16_round(amax)
+    inv_d = torch.where(amax > 0.0, 1.0 / amax, torch.zeros_like(amax))
+
+    q = _round_away_from_zero(xb * inv_d) + 1.0
+    q = torch.clamp(q, 0.0, 3.0)
+    xq = (q - 1.0) * d
+    return _restore_blocks(xq, orig_shape, x.dtype)
 
 
 def fake_quant_q2_0(x: torch.Tensor, *, use_ste: bool = True) -> torch.Tensor:
@@ -95,16 +114,24 @@ def fake_quant_q2_0(x: torch.Tensor, *, use_ste: bool = True) -> torch.Tensor:
     - encode ``q = clamp(std::round(x / d_raw) + 1, 0, 3)``;
     - dequantize with ``(q - 1) * d``.
     """
-    xb, orig_shape = _as_float_blocks(x, Q2_BLOCK_SIZE)
-    amax = xb.abs().max(dim=-1, keepdim=True).values
-    d = _fp16_round(amax)
-    inv_d = torch.where(amax > 0.0, 1.0 / amax, torch.zeros_like(amax))
-
-    q = _round_away_from_zero(xb * inv_d) + 1.0
-    q = torch.clamp(q, 0.0, 3.0)
-    xq = (q - 1.0) * d
-    xq = _restore_blocks(xq, orig_shape, x.dtype)
+    xq = _fake_quant_q2_0_no_grad(x)
     return _quantize_ste(x, xq) if use_ste else xq
+
+
+@torch.no_grad()
+def _fake_quant_q4_0_no_grad(x: torch.Tensor) -> torch.Tensor:
+    xb, orig_shape = _as_float_blocks(x, Q4_BLOCK_SIZE)
+    abs_x = xb.abs()
+    max_idx = abs_x.argmax(dim=-1, keepdim=True)
+    signed_absmax = xb.gather(dim=-1, index=max_idx)
+    d_raw = signed_absmax / -8.0
+    d = _fp16_round(d_raw)
+    inv_d = torch.where(d_raw != 0, 1.0 / d_raw, torch.zeros_like(d_raw))
+
+    q = torch.trunc(xb * inv_d + 8.5)
+    q = torch.clamp(q, 0.0, 15.0)
+    xq = (q - 8.0) * d
+    return _restore_blocks(xq, orig_shape, x.dtype)
 
 
 def fake_quant_q4_0(x: torch.Tensor, *, use_ste: bool = True) -> torch.Tensor:
@@ -117,19 +144,24 @@ def fake_quant_q4_0(x: torch.Tensor, *, use_ste: bool = True) -> torch.Tensor:
     - select 4-bit codes with ``trunc(x / d_raw + 8.5)``;
     - dequantize with ``(q - 8) * fp16(d_raw)``.
     """
+    xq = _fake_quant_q4_0_no_grad(x)
+    return _quantize_ste(x, xq) if use_ste else xq
+
+
+@torch.no_grad()
+def _fake_quant_q4_1_no_grad(x: torch.Tensor) -> torch.Tensor:
     xb, orig_shape = _as_float_blocks(x, Q4_BLOCK_SIZE)
-    abs_x = xb.abs()
-    max_idx = abs_x.argmax(dim=-1, keepdim=True)
-    signed_absmax = xb.gather(dim=-1, index=max_idx)
-    d_raw = signed_absmax / -8.0
+    x_min = xb.min(dim=-1, keepdim=True).values
+    x_max = xb.max(dim=-1, keepdim=True).values
+    d_raw = (x_max - x_min) / 15.0
     d = _fp16_round(d_raw)
+    m = _fp16_round(x_min)
     inv_d = torch.where(d_raw != 0, 1.0 / d_raw, torch.zeros_like(d_raw))
 
-    q = torch.trunc(xb * inv_d + 8.5)
+    q = torch.trunc((xb - x_min) * inv_d + 0.5)
     q = torch.clamp(q, 0.0, 15.0)
-    xq = (q - 8.0) * d
-    xq = _restore_blocks(xq, orig_shape, x.dtype)
-    return _quantize_ste(x, xq) if use_ste else xq
+    xq = q * d + m
+    return _restore_blocks(xq, orig_shape, x.dtype)
 
 
 def fake_quant_q4_1(x: torch.Tensor, *, use_ste: bool = True) -> torch.Tensor:
@@ -142,21 +174,11 @@ def fake_quant_q4_1(x: torch.Tensor, *, use_ste: bool = True) -> torch.Tensor:
     - select 4-bit codes with ``trunc((x - min) / d_raw + 0.5)``;
     - dequantize with ``q * fp16(d_raw) + fp16(min)``.
     """
-    xb, orig_shape = _as_float_blocks(x, Q4_BLOCK_SIZE)
-    x_min = xb.min(dim=-1, keepdim=True).values
-    x_max = xb.max(dim=-1, keepdim=True).values
-    d_raw = (x_max - x_min) / 15.0
-    d = _fp16_round(d_raw)
-    m = _fp16_round(x_min)
-    inv_d = torch.where(d_raw != 0, 1.0 / d_raw, torch.zeros_like(d_raw))
-
-    q = torch.trunc((xb - x_min) * inv_d + 0.5)
-    q = torch.clamp(q, 0.0, 15.0)
-    xq = q * d + m
-    xq = _restore_blocks(xq, orig_shape, x.dtype)
+    xq = _fake_quant_q4_1_no_grad(x)
     return _quantize_ste(x, xq) if use_ste else xq
 
 
+@torch.no_grad()
 def _fake_quant_q8_0_like(x: torch.Tensor) -> torch.Tensor:
     xb, orig_shape = _as_float_blocks(x, Q8_BLOCK_SIZE)
     d_raw = xb.abs().max(dim=-1, keepdim=True).values / 127.0

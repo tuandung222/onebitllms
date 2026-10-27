@@ -193,14 +193,29 @@ class LlamaCppFakeQuantLinear(nn.Module):
 
         w = self._apply_quantizer(self.quant_type, self.weight, activation=False)
 
-        if self.accumulator_dtype is not None:
+        # On CUDA, cuBLAS BF16/FP16 GEMM already accumulates in FP32 in Tensor Cores.
+        # Avoid casting BF16/FP16 inputs/weights to FP32 on CUDA, which disables Tensor Cores
+        # and doubles saved activation memory in Autograd.
+        use_explicit_acc_cast = (
+            self.accumulator_dtype is not None
+            and x.dtype != self.accumulator_dtype
+            and not (
+                x.is_cuda
+                and self.accumulator_dtype == torch.float32
+                and x.dtype in (torch.bfloat16, torch.float16)
+            )
+        )
+        if use_explicit_acc_cast:
             out = F.linear(
                 x.to(self.accumulator_dtype),
                 w.to(self.accumulator_dtype),
                 self.bias.to(self.accumulator_dtype) if self.bias is not None else None,
             )
             return out.to(x.dtype)
-        return F.linear(x, w, self.bias)
+
+        w_in = w.to(x.dtype) if w.dtype != x.dtype else w
+        b_in = (self.bias.to(x.dtype) if self.bias.dtype != x.dtype else self.bias) if self.bias is not None else None
+        return F.linear(x, w_in, b_in)
 
     def to_linear(self) -> nn.Linear:
         """Convert back to nn.Linear while preserving trained float weights."""
